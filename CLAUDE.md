@@ -6,7 +6,7 @@ Python 3.11, Windows, PowerShell.
 
 ## Commands (PowerShell)
 - Run Python from the already-activated environment. Never hard-code an environment name.
-- Full check (lint + types + tests): `./scripts/check.ps1`
+- Full check (lint + types + tests): `powershell -ExecutionPolicy Bypass -File scripts/check.ps1`
 - Tests for one module: `python -m pytest tests/test_<module>.py -q`
 - Headless pipeline on fixtures: `python -m core.run --project tests/fixtures/generated/project_basic`
 - Regenerate fixtures: `python -m tests.fixtures.generate` (writes `tests/fixtures/generated/`, gitignored)
