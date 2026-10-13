@@ -6,4 +6,4 @@
 - Spec split into `docs/spec/`, CLAUDE.md, path-scoped rules, task breakdown.
 
 ## Open issues
-- See `docs/decisions.md`.
+- Spec items resolved in `docs/spec/10-addendum.md` (A1–A10); see `docs/decisions.md`.

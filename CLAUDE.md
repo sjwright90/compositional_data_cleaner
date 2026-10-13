@@ -8,8 +8,8 @@ Python 3.11, Windows, PowerShell.
 - Run Python from the already-activated environment. Never hard-code an environment name.
 - Full check (lint + types + tests): `./scripts/check.ps1`
 - Tests for one module: `python -m pytest tests/test_<module>.py -q`
-- Headless pipeline on fixtures: `python -m core.run --project tests/fixtures/project_basic`
-- Regenerate fixtures: `python -m tests.fixtures.generate`
+- Headless pipeline on fixtures: `python -m core.run --project tests/fixtures/generated/project_basic`
+- Regenerate fixtures: `python -m tests.fixtures.generate` (writes `tests/fixtures/generated/`, gitignored)
 - Run app: `python -m app`
 - Install: `pip install -e ".[test]"` (inside the already-activated environment)
 
@@ -19,6 +19,7 @@ Python 3.11, Windows, PowerShell.
 - `config/defaults/`: shipped config files (CSV/JSON). Never edit their contents unless a task says so.
 - `docs/spec/`: the build spec, split by section. Source of truth. Do not edit.
   `docs/spec_v5.md` is the archived original. `§` numbers always refer to the original numbering.
+  `docs/spec/10-addendum.md` overrides earlier spec files where they conflict; read the relevant addendum items for every task.
 - `docs/decisions.md`: log of interpretation choices and open spec items (append-only).
 - `tasks/`: one file per work package. `tasks/INDEX.md` gives order and status (replaces spec §10).
 - `PROGRESS.md`: current state; read at session start, update at task end.
@@ -36,6 +37,7 @@ Python 3.11, Windows, PowerShell.
 | `07-summary-export.md` | §6.10 summary, §6.11 export |
 | `08-config-audit.md` | §7 config files, §8 audit & reproducibility |
 | `09-testing-milestones-deferred.md` | §9 testing, §10 milestones (superseded), §11 deferred |
+| `10-addendum.md` | Addendum A1–A10: resolved decisions (authoritative) |
 
 ## Build order: headless first
 The whole core pipeline runs from a recipe via `core.run` before any Dash UI exists.
@@ -43,7 +45,7 @@ A gate is a required recipe field; the headless runner stops and lists unresolve
 Do not write `app/` code until the U-tasks are reached in `tasks/INDEX.md`.
 
 ## Hard invariants (tests enforce most of these; do not work around them)
-1. Every stage function returns `StageResult(output, report)`. No side effects in core;
+1. Every registered `Stage.run` returns `StageResult(output, report)` (impute layers are helpers). No side effects in core;
    only `Project` writes files, logs and checkpoints.
 2. Artifacts are immutable. Stages return new objects; never mutate inputs.
 3. Decisions are keyed by stable IDs from `core/ids.py`, never by display names or
