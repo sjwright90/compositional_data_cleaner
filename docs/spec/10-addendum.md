@@ -62,3 +62,22 @@ Only `DETECT` and `ND` cells count toward `min_obs_per_cell`. `GT` cells are dis
 ## A10. Fixture location
 **Overrides:** §4 (layout, `tests/`), §9.
 The fixture generator writes projects to `tests/fixtures/generated/<name>/` (gitignored). `project_basic` is the first.
+
+## A11. Non-detect post-processing
+**Overrides:** §6.8 (Layer 2 clipping, final-table checks, per-feature summary) and A6, for non-detect cells only.
+Applied after pass 2 of `impute_censored`, to ND cells only:
+1. Clip imputed ND values above their own DL to the DL.
+2. An imputed ND is degenerate if `≤ 0` or `< nd_min_fraction × its DL` (Impute recipe param `nd_min_fraction`, default `0.001`).
+3. Replace degenerate values:
+   - (a) if the same location × feature has non-degenerate imputed NDs, use `0.5 ×` the smallest of them;
+   - (b) otherwise use `nd_fraction ×` the cell's own DL.
+4. If an (a) replacement exceeds the cell's DL, use (b) for that cell instead.
+
+- Rule (a) never borrows across locations. Missing (non-ND) cells are not affected.
+- Final-table check: every imputed ND lies in (0, DL].
+- Per-feature summary: separate counts for clipped-to-DL, replaced-via-(a), replaced-via-(b).
+- **Deferred addition (§11):** per-feature `nd_fill_method` recipe option (`model` | `half_median_dl`), where `half_median_dl` fills that feature's NDs with `0.5 ×` the median DL.
+
+## A12. Non-positive detection limits
+**Overrides:** §6.2 (result parsing, non-detect evidence), §6.5 (qualifier flags rules).
+A non-detect with DL ≤ 0 (including `<0`) becomes `MISSING_ND_NO_DL` with reason "non-positive DL", counted and downloadable.
