@@ -38,7 +38,7 @@ Only `DETECT` and `ND` cells count toward `min_obs_per_cell`. `GT` cells are dis
   - `transform = none` and `allow_negative = false`: `min_value = 0`.
   - `allow_negative = true`: unbounded.
 - Final-table checks: `> 0` for log features; `≥ 0` for non-negative linear features; finite for `allow_negative` features. Observed zeros stay valid.
-- The per-feature summary adds a count of imputed values at the lower bound.
+- The per-feature summary adds a count of imputed values at the lower bound. It applies to missing (non-ND) cells only, and the summary column is named `missing_imputed_at_lower_bound`. A11 guarantees imputed NDs are > 0.
 - Vocabulary `min_value` / `max_value` columns are added to Deferred (§11).
 
 ## A7. Fingerprints and config
@@ -85,3 +85,5 @@ Applied after pass 2 of `impute_censored`, to ND cells only:
 ## A12. Non-positive detection limits
 **Overrides:** §6.2 (result parsing, non-detect evidence), §6.5 (qualifier flags rules).
 A non-detect with DL ≤ 0 (including `<0`) becomes `MISSING_ND_NO_DL` with reason "non-positive DL", counted and downloadable.
+- Parsing (T12, §6.2) records `<0` as an ND with DL = 0, without error or special handling.
+- Clean (T22, §6.5) applies the non-positive-DL rule.

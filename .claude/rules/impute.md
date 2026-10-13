@@ -19,4 +19,4 @@ paths:
 - Time order is not used; samples within a location are exchangeable.
 - Persist the `ImputerInput` snapshot before running.
 - Final-table checks (fail loudly): all values finite; > 0 for log features; ≥ 0 for non-negative linear features; finite only for `allow_negative` features; every imputed ND in (0, DL]; imputed-cell mask = input ND ∪ `MISSING_*`. Observed zeros stay valid. — A6, A11
-- Outputs: imputed table, imputed-cell mask (always), ND mask, per-feature summary (includes count of imputed values at the lower bound and separate clipped-to-DL, replaced-via-(a), replaced-via-(b) counts), convergence-warnings table. — A6, A11
+- Outputs: imputed table, imputed-cell mask (always), ND mask, per-feature summary (includes `missing_imputed_at_lower_bound`, missing non-ND cells only, and separate clipped-to-DL, replaced-via-(a), replaced-via-(b) counts), convergence-warnings table. — A6, A11

@@ -18,3 +18,5 @@
 | 2026-10-13 | setup | A3: glossary "gate" (UI click) vs "gate (headless)" | RESOLVED: see `docs/spec/10-addendum.md` A3 (amended) | One concept, two entry points setting the same gate field |
 | 2026-10-13 | setup | A9: how to mark placeholder config without comments in config files | RESOLVED: see `docs/spec/10-addendum.md` A9 (amended) | README.md + empty PLACEHOLDER marker; loader warning item surfaced in runner, status rail and summary header |
 | 2026-10-13 | setup | A11 replaced and A12 added (non-detect post-processing; non-positive DL) | RESOLVED: see `docs/spec/10-addendum.md` A11, A12 | Logged above |
+| 2026-10-13 | setup | A6 lower-bound count vs A11 (NDs now always > 0): which cells does it cover? | RESOLVED: see `docs/spec/10-addendum.md` A6 (amended) | Missing (non-ND) cells only; column `missing_imputed_at_lower_bound` |
+| 2026-10-13 | setup | Where is `<0` handled: parsing or Clean? | RESOLVED: see `docs/spec/10-addendum.md` A12 (amended) | T12 records ND with DL = 0; T22 applies the non-positive-DL rule |
