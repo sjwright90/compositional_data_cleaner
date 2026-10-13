@@ -1,6 +1,6 @@
 # PROGRESS
 
-**State:** T00 done (branch `feature/t00-scaffold`). **Next:** T01 (`tasks/T01.md`).
+**State:** T00 done, merged to `main`. **Next:** T01 (`tasks/T01.md`).
 
 ## Done
 - Spec split into `docs/spec/`, CLAUDE.md, path-scoped rules, task breakdown.
