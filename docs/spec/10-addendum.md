@@ -8,7 +8,8 @@ Original spec files `00`–`09` are unedited. Where an item below conflicts with
 
 ## A2. Environment name
 **Overrides:** §0.3 "Technical baseline (Q7)".
-The environment name mentioned in §0.3 is informational only. It appears only in `CLAUDE.local.md` (untracked), never in code, scripts or tracked docs.
+The environment name mentioned in §0.3 is informational only. It appears only in `CLAUDE.local.md` (untracked), never in code, scripts, config or tracked files created after the split.
+The verbatim spec files (`docs/spec_v5.md`, `docs/spec/00`–`09`) are exempt: they are an archival record and stay unedited.
 
 ## A3. Gates in headless mode
 **Overrides:** §2 (glossary: "gate"), §3.4, §4 (layout), §6.x "Gates" bullets.
@@ -18,6 +19,7 @@ The environment name mentioned in §0.3 is informational only. It appears only i
 - Flag `--accept-defaults` (fixtures and tests only) writes an explicit `accept_default` entry for every gate into the output recipe.
 - `core/run.py` is added to the §4 layout.
 - Glossary addition — **gate (headless):** a required recipe field that must hold an explicit decision or `{"accept_default": true}` before the run can pass the stage.
+- One concept, two entry points: the glossary's "gate" (a UI click) is the interactive way of setting the gate field; "gate (headless)" is the same field set via the recipe.
 
 ## A4. Impute layers are helpers, not Stages
 **Overrides:** §3.1, §4.1 (`StageResult` rule), §8 ("every core stage function returns a report").
@@ -57,7 +59,9 @@ Only `DETECT` and `ND` cells count toward `min_obs_per_cell`. `GT` cells are dis
 - The default `min_obs_per_cell` lives in `qa_thresholds.json`. A project value in the Select recipe params overrides it, and the recipe records the value used.
 - RPD = |a − b| / ((a + b) / 2) × 100, for both-detect pairs only. Pairs where either value is `ND` are reported as "ND pair".
 - Tests use only `tests/fixtures/config/` (synthetic, created in T04), never `config/defaults/`.
-- `config/defaults/` starts as a minimal starter set with a header comment marking it as a placeholder for the client's seed files.
+- `config/defaults/` starts as a minimal starter set standing in for the client's seed files. Config files contain no comments: standard CSV/JSON only, and loaders never skip `#` lines or `_comment` keys.
+- `config/defaults/README.md` explains the starter set. An empty marker file `config/defaults/PLACEHOLDER` signals placeholder status.
+- While the marker exists, the loader emits a warning report item, and the headless runner output, the app status rail and the summary header show "using placeholder configuration".
 
 ## A10. Fixture location
 **Overrides:** §4 (layout, `tests/`), §9.

@@ -14,3 +14,7 @@
 | 2026-10-13 | setup | §4 layout has no `core/run.py`; fixture path for the headless runner is not specified | RESOLVED: see `docs/spec/10-addendum.md` A10 | Runner and fixture location needed for headless-first build |
 | 2026-10-13 | setup | A6 `min_value = 0` allows imputed NDs of exactly 0 although §6.8 requires ND in (0, DL] | RESOLVED: see `docs/spec/10-addendum.md` A11 | Degenerate-ND replacement rules (a)/(b) after pass 2; new `nd_min_fraction` param |
 | 2026-10-13 | setup | Non-detects with DL ≤ 0 (e.g. `<0`) have no defined handling in §6.2/§6.5 | RESOLVED: see `docs/spec/10-addendum.md` A12 | Become `MISSING_ND_NO_DL` with reason "non-positive DL" |
+| 2026-10-13 | setup | A2: env name still appears in verbatim spec files | RESOLVED: see `docs/spec/10-addendum.md` A2 (amended) | Verbatim spec files are exempt archival record; rule applies to files created after the split |
+| 2026-10-13 | setup | A3: glossary "gate" (UI click) vs "gate (headless)" | RESOLVED: see `docs/spec/10-addendum.md` A3 (amended) | One concept, two entry points setting the same gate field |
+| 2026-10-13 | setup | A9: how to mark placeholder config without comments in config files | RESOLVED: see `docs/spec/10-addendum.md` A9 (amended) | README.md + empty PLACEHOLDER marker; loader warning item surfaced in runner, status rail and summary header |
+| 2026-10-13 | setup | A11 replaced and A12 added (non-detect post-processing; non-positive DL) | RESOLVED: see `docs/spec/10-addendum.md` A11, A12 | Logged above |
