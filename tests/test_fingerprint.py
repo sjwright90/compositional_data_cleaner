@@ -239,9 +239,7 @@ class TestConfigHash:
         _write(defaults, "tokens.json", "default edited")
         assert config_hash(_A, layers) != with_override
 
-    def test_swapping_contents_between_layers_changes_hash(
-        self, layers: tuple[Path, Path]
-    ) -> None:
+    def test_swapping_contents_between_layers_changes_hash(self, layers: tuple[Path, Path]) -> None:
         defaults, project = layers
         _write(defaults, "tokens.json", "first")
         _write(project, "tokens.json", "second")
