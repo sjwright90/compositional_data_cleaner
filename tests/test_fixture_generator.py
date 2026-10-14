@@ -10,7 +10,7 @@ import pytest
 from openpyxl import load_workbook  # type: ignore[import-untyped]
 
 from core.config import load_config
-from tests.fixtures.generate import LAB_A, LAB_B, LAB_C, LAB_D, generate
+from tests.fixtures.generate import LAB_A, LAB_B, LAB_C, LAB_D, LAB_E, generate
 from tests.fixtures.truth import (
     ASSUMED_CONFIG,
     DEFAULT_SEED,
@@ -86,7 +86,7 @@ def test_different_seed_changes_some_values(tmp_path: Path) -> None:
     assert t1.case_ids() == t2.case_ids()
     p1, p2 = tmp_path / "s1" / "project_basic", tmp_path / "s2" / "project_basic"
     changed = 0
-    for name in (LAB_A, LAB_B, LAB_C, LAB_D):
+    for name in (LAB_A, LAB_B, LAB_C, LAB_D, LAB_E):
         if name.endswith(".csv"):
             changed += (p1 / name).read_bytes() != (p2 / name).read_bytes()
         else:
@@ -189,6 +189,41 @@ def test_no_result_tokens_recount(built: tuple[Path, Truth]) -> None:
     assert set(case.expected["tokens"]) == set(ASSUMED_CONFIG.no_result_tokens)
 
 
+def test_wide_standard_recount(built: tuple[Path, Truth]) -> None:
+    project, truth = built
+    case = _case(truth, "wide_standard")
+    assert "requested by Sam" in case.description
+    raw = pd.read_excel(project / LAB_E, dtype=str, keep_default_na=False, header=None).fillna("")
+    header = list(raw.iloc[0])
+    assert header[:4] == ["Sample ID", "Location", "Date", "Sample Type"]
+    assert "Manganese (Dissolved)" in header
+    units, dl, data = raw.iloc[1], raw.iloc[2], raw.iloc[3:]
+    assert any(u == "S.U." for u in units)
+    assert all(c == "" for c in units.iloc[:4]) and all(c == "" for c in dl.iloc[:4])
+    assert any(v != "" for v in dl.iloc[4:])
+    cells = data.iloc[:, 4:].astype(str).apply(lambda col: col.str.strip())
+    flat = pd.Series(cells.to_numpy().ravel())
+    assert len(data) == case.expected["samples"]
+    assert cells.shape[1] == case.expected["analyte_columns"]
+    assert int(flat.str.startswith("<").sum()) == case.expected["nd_cells"]
+    assert int((flat == "").sum()) == case.expected["blank_cells"]
+    tokens = {t.casefold() for t in ASSUMED_CONFIG.no_result_tokens}
+    assert int(flat.str.casefold().isin(tokens).sum()) == case.expected["token_cells"]
+    assert int(flat.str.startswith(">").sum()) == case.expected["gt_cells"]
+    long_locs = set(_long_frame(project)["location"])
+    wide_locs = set(data.iloc[:, 1])
+    overlap = sorted(long_locs & wide_locs)
+    assert len(overlap) >= 2
+    assert overlap == case.expected["overlap_locations"]
+
+
+def test_trip_blank_is_trip_blank(built: tuple[Path, Truth]) -> None:
+    project, truth = built
+    df = _long_frame(project)
+    sid = _case(truth, "qc_trip_blank_detect").expected["sample_id"]
+    assert set(df.loc[df["sample_id"] == sid, "sample_type"]) == {"Trip Blank"}
+
+
 def test_lab_b_file_name_matches_date_rule_pattern() -> None:
     assert fnmatch.fnmatch(LAB_B, ASSUMED_CONFIG.lab_b_source_pattern)
     assert LAB_B == ASSUMED_CONFIG.lab_b_file_name
@@ -247,13 +282,32 @@ def test_assumed_config_values_in_fixture_config() -> None:
     assert matched, "no header rule matches the example header"
     m = matched[0]
     assert (m.group("analyte"), m.group("fraction"), m.group("unit")) == a.header_example_parts
+    no_unit = [mm for r in cfg.header_rules if (mm := re.match(r.regex, a.header_example_no_unit))]
+    assert no_unit, "header rules must treat the unit as optional (A14)"
+    assert (no_unit[0].group("analyte"), no_unit[0].group("fraction")) == (
+        a.header_example_parts[0],
+        a.header_example_parts[1],
+    )
+    assert no_unit[0].group("unit") is None
+    assert set(a.units_row_labels) <= set(cfg.tokens.units_row_labels)
+    assert set(a.dl_row_labels) <= set(cfg.tokens.dl_row_labels)
 
     assert set(a.units) <= {u.unit for u in cfg.units}
+    assert {u.unit_class for u in cfg.units if u.unit == "mV"} == {"potential"}
 
     cfg_tokens = {t.casefold() for t in cfg.tokens.no_result_tokens}
     assert {t.casefold() for t in a.no_result_tokens} <= cfg_tokens
 
     assert set(a.analyte_keys) <= {r.key for r in cfg.analytes}
+    by_key = {r.key: r for r in cfg.analytes}
+    assert set(a.ion_keys) <= set(by_key)
+    assert [by_key[k].name for k in a.ion_keys] == list(a.ion_analytes)
+    assert all(by_key[k].molar_mass and by_key[k].charge for k in a.ion_keys)
+    known = {r.name.casefold() for r in cfg.analytes} | {
+        al.casefold() for r in cfg.analytes for al in r.aliases
+    }
+    assert not known & {n.casefold() for n in a.unknown_analytes}
+    assert a.trip_blank_alias in cfg.tokens.sample_type_aliases[a.trip_blank_type]
     assert cfg.qa_thresholds.min_obs_per_cell == a.min_obs_per_cell
 
     no3_n = [

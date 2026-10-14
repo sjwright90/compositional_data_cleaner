@@ -48,6 +48,7 @@ REQUIRED_CASE_IDS: tuple[str, ...] = (
     "spelling_variants",
     "transposed_wide",
     "unknown_analytes",
+    "wide_standard",
     "zeros_allow_negative",
     "zeros_log",
     "blank_result_nd",
@@ -65,9 +66,25 @@ class AssumedConfig:
     lab_b_file_name: str = "lab_b_long.csv"
     header_example: str = "Manganese (Dissolved) mg/L"
     header_example_parts: tuple[str, str, str] = ("Manganese", "Dissolved", "mg/L")
-    units: tuple[str, ...] = ("mg/L", "ug/L", "mg/L as N", "ppm", "S.U.")
+    header_example_no_unit: str = "Manganese (Dissolved)"
+    units_row_labels: tuple[str, ...] = ("Units", "Unit")
+    dl_row_labels: tuple[str, ...] = ("LOR", "RL", "MDL", "PQL", "DL")
+    units: tuple[str, ...] = ("mg/L", "ug/L", "mg/L as N", "ppm", "S.U.", "mV")
     no_result_tokens: tuple[str, ...] = ("ND", "NM", "NA", "---")
     analyte_keys: tuple[str, ...] = ("mn", "fe", "no3", "ph", "eh")
+    ion_analytes: tuple[str, ...] = (
+        "Calcium",
+        "Magnesium",
+        "Sodium",
+        "Potassium",
+        "Chloride",
+        "Sulfate",
+        "Bicarbonate",
+    )
+    ion_keys: tuple[str, ...] = ("ca", "mg", "na", "k", "cl", "so4", "hco3")
+    unknown_analytes: tuple[str, ...] = ("Lithium", "Strontium")
+    trip_blank_alias: str = "trip blank"
+    trip_blank_type: str = "blank_trip"
     no3_as_n_factor: float = 4.426
     min_obs_per_cell: int = 3
     nd_detect_flag: str = "ND"

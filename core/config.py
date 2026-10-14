@@ -218,6 +218,8 @@ class Tokens(_Doc):
     numeric_locale: NumericLocale
     name_template: str = Field(min_length=1)
     alias_near_match_ratio: float = Field(gt=0.0, le=1.0)
+    units_row_labels: tuple[str, ...]
+    dl_row_labels: tuple[str, ...]
 
     @field_validator("column_role_keywords")
     @classmethod

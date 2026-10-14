@@ -36,6 +36,7 @@ LAB_A = "lab_a_long.xlsx"
 LAB_B = ASSUMED_CONFIG.lab_b_file_name
 LAB_C = "lab_c_wide_transposed.xlsx"
 LAB_D = "lab_d_wide_decimal_comma.csv"
+LAB_E = "lab_e_wide.xlsx"
 TRUTH = "truth.json"
 
 LONG_COLS: tuple[str, ...] = (
@@ -417,10 +418,10 @@ def _build_lab_a(rng: np.random.Generator, cases: _Cases) -> _Long:
         parent_sample_id=parent,
     )
     tb = a.new_sample()
-    a.add("MW-2", _iso(120), "Manganese", "0.05", sample_id=tb, sample_type="Field Blank")
+    a.add("MW-2", _iso(120), "Manganese", "0.05", sample_id=tb, sample_type="Trip Blank")
     cases.add(
         "qc_trip_blank_detect",
-        "Trip blank (sample_type 'Field Blank', the alias the fixture config maps) with a detect",
+        "Trip blank (sample_type 'Trip Blank') with a detect at MW-2",
         f,
         rows=1,
         sample_id=tb,
@@ -595,8 +596,7 @@ def _build_lab_a(rng: np.random.Generator, cases: _Cases) -> _Long:
     pct = round(100 * (cat - ani) / (cat + ani), 1)
     cases.add(
         "poor_ion_balance",
-        "One sample at MW-22 with a cation/anion imbalance far above any tolerance"
-        " (major-ion analytes are not in the fixture vocabulary)",
+        "One sample at MW-22 with a cation/anion imbalance far above any tolerance",
         f,
         rows=len(conc),
         sample_id=ib,
@@ -738,6 +738,63 @@ def _write_lab_d(path: Path, rng: np.random.Generator, cases: _Cases) -> None:
     )
 
 
+def _write_lab_e(path: Path, rng: np.random.Generator, cases: _Cases) -> None:
+    """Standard wide export: header, units row, detection-limit row, then one row per sample."""
+    meta = ["Sample ID", "Location", "Date", "Sample Type"]
+    analytes = (
+        ("Manganese (Dissolved)", "mg/L", "0.005", (0.01, 0.4)),
+        ("Iron (Dissolved)", "mg/L", "0.01", (0.05, 0.9)),
+        ("Iron (Total)", "mg/L", "0.01", (0.1, 1.5)),
+        ("pH", "S.U.", "", (6.5, 7.8)),
+    )
+    header = meta + [a[0] for a in analytes]
+    units = ["", "", "", ""] + [a[1] for a in analytes]
+    dl_row = ["", "", "", ""] + [a[2] for a in analytes]
+    samples = (
+        ("E0001", "MW-3", "2023-07-03", "Normal"),
+        ("E0002", "MW-3", "2023-08-07", "Normal"),
+        ("E0003", "BG-2", "2023-07-04", "Normal"),
+        ("E0004", "BG-2", "2023-08-08", "Normal"),
+        ("E0005", "WELL-E1", "2023-07-05", "Normal"),
+        ("E0006", "WELL-E1", "2023-08-09", "Field Duplicate"),
+        ("E0007", "WELL-E2", "2023-07-06", "Normal"),
+    )
+    overrides = {  # (sample row, analyte column) -> cell text
+        (1, 0): "<0.005",
+        (2, 1): "<0.01",
+        (3, 1): "<0.01",
+        (3, 2): "",
+        (4, 0): "",
+        (5, 2): "NM",
+        (6, 2): ">1.5",
+    }
+    rows: list[list[Any]] = []
+    for i, s in enumerate(samples):
+        cells = []
+        for j, (_, _, _, (lo, hi)) in enumerate(analytes):
+            nd = 2 if j == 3 else 3
+            v = _num(float(np.round(rng.uniform(lo, hi), nd)))
+            cells.append(overrides.get((i, j), v))
+        rows.append([*s, *cells])
+    _write_xlsx(path, header, [units, dl_row, *rows], "wide")
+    flat = [c for (_, _), c in overrides.items()]
+    cases.add(
+        "wide_standard",
+        "standard wide export, requested by Sam",
+        (LAB_E,),
+        samples=len(samples),
+        analyte_columns=len(analytes),
+        nd_cells=sum(1 for c in flat if c.startswith("<")),
+        blank_cells=sum(1 for c in flat if c == ""),
+        token_cells=sum(1 for c in flat if c == "NM"),
+        gt_cells=sum(1 for c in flat if c.startswith(">")),
+        overlap_locations=["BG-2", "MW-3"],
+        units_row=True,
+        dl_row=True,
+        metadata_cells_blank=True,
+    )
+
+
 def generate(name: str, seed: int, out_root: Path) -> Truth:
     """Write fixture project `name` under `out_root/<name>/`; return the injected-case truth."""
     if name != "project_basic":
@@ -753,6 +810,7 @@ def generate(name: str, seed: int, out_root: Path) -> Truth:
     _write_csv(project / LAB_B, LONG_COLS, _long_matrix(long_b))
     _write_lab_c(project / LAB_C, rng, cases)
     _write_lab_d(project / LAB_D, rng, cases)
+    _write_lab_e(project / LAB_E, rng, cases)
 
     n_a = sum(1 for r in long_a.rows if r["qualifier"] == "U")
     n_b = sum(1 for r in long_b.rows if r["qualifier"] == "U")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import shutil
 from pathlib import Path
@@ -47,6 +48,16 @@ def _append(d: Path, name: str, text: str) -> None:
         fh.write(text)
 
 
+def _next_line(d: Path, name: str) -> int:
+    """1-based line number a row appended to `d/name` will occupy."""
+    return len((d / name).read_text(encoding="utf-8").splitlines()) + 1
+
+
+def _column(d: Path, name: str, column: str) -> list[str]:
+    with (d / name).open(encoding="utf-8", newline="") as fh:
+        return [row[column] for row in csv.DictReader(fh)]
+
+
 def _actions(cfg: Config) -> list[str]:
     return [r.action for r in cfg.report]
 
@@ -67,7 +78,10 @@ ANALYTE_HEADER = (
 class TestParsing:
     def test_fixture_loads(self) -> None:
         cfg = _load(FIXTURE)
-        assert [a.key for a in cfg.analytes] == ["mn", "fe", "no3", "ph", "eh"]
+        keys = _column(FIXTURE, "known_analytes.csv", "key")
+        assert [a.key for a in cfg.analytes] == keys
+        assert keys[:5] == ["mn", "fe", "no3", "ph", "eh"]
+        assert [u.unit for u in cfg.units] == _column(FIXTURE, "known_units.csv", "unit")
         assert [u.unit for u in cfg.units][:2] == ["mg/L", "ug/L"]
         assert dict(cfg.flag_map) == {"U": "DL", "J": "Ignore", "R": "Bad"}
         assert cfg.qa_thresholds.min_obs_per_cell == 3
@@ -114,8 +128,9 @@ class TestParsing:
             _load(base)
 
     def test_bad_enum_names_file_and_line(self, base: Path) -> None:
+        n = _next_line(base, "known_analytes.csv")
         _append(base, "known_analytes.csv", "Zinc,zn,,metal,Zn,Zn,zn,sqrt,false,,\n")
-        with pytest.raises(ConfigError, match=r"known_analytes\.csv.*line 7.*transform"):
+        with pytest.raises(ConfigError, match=rf"known_analytes\.csv.*line {n}\b.*transform"):
             _load(base)
 
     def test_bad_regex(self, base: Path) -> None:
@@ -124,8 +139,9 @@ class TestParsing:
             _load(base)
 
     def test_hash_lines_are_not_skipped(self, base: Path) -> None:
+        n = _next_line(base, "known_units.csv")
         _append(base, "known_units.csv", "# a comment,x,y,z\n")
-        with pytest.raises(ConfigError, match=r"known_units\.csv.*line 7"):
+        with pytest.raises(ConfigError, match=rf"known_units\.csv.*line {n}\b"):
             _load(base)
 
     def test_comment_key_is_unknown_key(self, base: Path) -> None:
@@ -215,7 +231,7 @@ class TestLayeringCsv:
             ANALYTE_HEADER + "MANGANESE,MN,manganese total; mn,Metal,mn,MN,Mn,log,FALSE,54.938,\n",
         )
         cfg = _load(base, project)
-        assert [a.key for a in cfg.analytes] == ["mn", "fe", "no3", "ph", "eh"]
+        assert [a.key for a in cfg.analytes] == _column(base, "known_analytes.csv", "key")
         assert cfg.analytes[0].source == "shipped"
         items = [r for r in cfg.report if r.action == "config_row_ignored_identical"]
         assert len(items) == 1 and items[0].target == "known_analytes.csv:mn"
@@ -249,13 +265,15 @@ class TestLayeringCsv:
             _load(base, project)
 
     def test_clash_inside_one_layer_blocks(self, base: Path) -> None:
+        n = _next_line(base, "known_analytes.csv")
         _append(base, "known_analytes.csv", "Zinc,zn,Mn,metal,Zn,Zn,zn,log,false,,\n")
-        with pytest.raises(ConfigError, match=r"line 7"):
+        with pytest.raises(ConfigError, match=rf"known_analytes\.csv.*line {n}\b"):
             _load(base)
 
     def test_duplicate_row_inside_one_layer_blocks(self, base: Path) -> None:
+        n = _next_line(base, "known_units.csv")
         _append(base, "known_units.csv", "mg/L,concentration,water,mgL\n")
-        with pytest.raises(ConfigError, match=r"known_units\.csv.*line 7"):
+        with pytest.raises(ConfigError, match=rf"known_units\.csv.*line {n}\b"):
             _load(base)
 
     def test_unit_identical_noop_and_differing_blocks(self, base: Path, project: Path) -> None:
@@ -265,7 +283,7 @@ class TestLayeringCsv:
             "unit,unit_class,applies_to,column_suffix\nMG/L,concentration,water,mgL\n",
         )
         cfg = _load(base, project)
-        assert len(cfg.units) == 5
+        assert len(cfg.units) == len(_column(base, "known_units.csv", "unit"))
         assert _actions(cfg) == ["config_row_ignored_identical"]
         _w(
             project,

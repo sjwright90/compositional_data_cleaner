@@ -1,2 +1,2 @@
 order,regex
-1,^(?P<analyte>.+?)\s*\((?P<fraction>Dissolved|Total)\)\s*(?P<unit>\S+)$
+1,^(?P<analyte>.+?)\s*\((?P<fraction>Dissolved|Total)\)(?:\s*(?P<unit>\S+))?$

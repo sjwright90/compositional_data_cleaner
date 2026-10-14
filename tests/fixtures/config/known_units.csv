@@ -4,3 +4,4 @@ ug/L,concentration,water,ugL
 mg/L as N,concentration,water,mgL_N
 ppm,concentration,physical,ppm
 S.U.,ph,water,SU
+mV,potential,water,mV
