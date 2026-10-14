@@ -17,7 +17,7 @@ Python 3.11, Windows, PowerShell.
 - `core/`: pure Python pipeline. NO Dash imports, ever. `core/run.py` is the headless CLI runner.
 - `app/`: Dash UI. Talks to core ONLY through `core.project.Project`. Built last (U0-U5).
 - `config/defaults/`: shipped config files (CSV/JSON). Never edit their contents unless a task says so.
-- `docs/spec/`: the build spec, split by section. Source of truth. Do not edit.
+- `docs/spec/`: the build spec, split by section. Source of truth. `docs/spec_v5.md` and `docs/spec/00`–`09`: never edit. `docs/spec/10-addendum.md`: append-only, and only when Sam explicitly instructs a new addendum item.
   `docs/spec_v5.md` is the archived original. `§` numbers always refer to the original numbering.
   `docs/spec/10-addendum.md` overrides earlier spec files where they conflict; read the relevant addendum items for every task.
 - `docs/decisions.md`: log of interpretation choices and open spec items (append-only).
