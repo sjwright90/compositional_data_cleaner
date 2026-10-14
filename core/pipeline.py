@@ -18,7 +18,7 @@ import pandas as pd
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    Vocabulary = Any  # replaced by core.vocab.Vocabulary in T04
+    from core.vocab import Vocabulary
 
 In = TypeVar("In", contravariant=True)
 P = TypeVar("P", contravariant=True)

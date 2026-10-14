@@ -1,0 +1,9 @@
+{
+  "nd_warn_pct": 50.0,
+  "dominant_warn_pct": 90.0,
+  "ion_balance_tol": 10.0,
+  "dt_tol": 10.0,
+  "tds_ec_range": {"min": 0.5, "max": 0.8},
+  "high_dl_percentile": 90.0,
+  "min_obs_per_cell": 3
+}

@@ -1,0 +1,6 @@
+name,key,aliases,analyte_class,symbol,plot_label,filename_key,transform,allow_negative,molar_mass,charge
+Manganese,mn,Mn;Manganese Total,metal,Mn,Mn,mn,log,false,54.938,
+Iron,fe,Fe;Iron Total,metal,Fe,Fe,fe,log,false,55.845,
+Nitrate,no3,NO3;Nitrate as NO3,anion,NO3,NO3,no3,log,false,62.004,-1
+pH,ph,pH Field,physchem,pH,pH,ph,none,false,,
+Eh,eh,ORP;Redox Potential,physchem,Eh,Eh,eh,none,true,,

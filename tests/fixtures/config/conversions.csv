@@ -1,0 +1,5 @@
+from_unit,to_unit,factor,offset,analyte
+mg/L,ug/L,1000,0,
+ug/L,mg/L,0.001,0,
+mg/L as N,mg/L,1,0,
+mg/L as N,mg/L,4.426,0,no3
