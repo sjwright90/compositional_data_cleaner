@@ -26,3 +26,7 @@
 | 2026-10-13 | T00 | `vocab` parameter type before `core/vocab.py` exists (T04) | `Vocabulary` is an `Any` alias under `TYPE_CHECKING` in `core/pipeline.py` | Avoid creating vocab.py out of scope |
 | 2026-10-13 | T00 | `ruff`, `mypy`, `pandas-stubs` placement | Pinned in `test` extra (check.ps1 needs them) | Not listed in spec §4 dependencies |
 | 2026-10-13 | T00 | Contract check strictness | `len(report) >= 1` required of every stage; `ReportItem.params` stored as `MappingProxyType`; `evidence` excluded from eq/hash | User decision |
+| 2026-10-14 | T01 | Short SHA-256 length for ingest group ID | 16 hex chars over JSON-encoded sorted (column, value) pairs | Unambiguous encoding; collision risk negligible at dictionary scale |
+| 2026-10-14 | T01 | Are ingest key column names normalised? | Yes, `normalise_token` applied to column names and values; missing/None value -> `""` | Header whitespace/case variants must not split a group |
+| 2026-10-14 | T01 | `\|` inside FeatureId parts | `FeatureId.__post_init__` raises `ValueError` | Guarantees `parse(canonical()) == f` |
+| 2026-10-14 | T01 | Duplicate group hash details | Full SHA-256 of candidates sorted by canonical form; codes normalised (`normalise_code`), deduplicated, sorted; NaN/None serialised as tokens, floats via `repr` | Stable under reordering; deterministic across runs |
