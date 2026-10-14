@@ -109,3 +109,11 @@ A wide sheet has one header row, then optionally a units row and a detection-lim
    - Otherwise, rows directly after the header whose metadata cells are all blank: a units row if its analyte cells resolve to known units; a DL row if every non-blank analyte cell is numeric.
    - Any other unlabelled non-data row blocks with a plain-language message naming the file and row.
    - Emit a `ReportItem` listing the detected rows, and record them in the recipe so replay uses the same rows.
+
+## A15. Source import: copy into the project
+**Fills a gap in:** §6.1.
+Sources are imported by copying into `<project>/sources/`. The recipe stores the project-relative posix path and SHA-256 of the copy. The original absolute path and import time are recorded in the audit log only, not the recipe, so the recipe hash stays machine-independent. Importing a file whose name matches an existing source:
+- same SHA-256: no-op, with an info `ReportItem`;
+- different content: copy as `<stem>_2<ext>` (then `_3`, …) and emit a warning `ReportItem` naming both files.
+
+Imported copies are never modified. `build_recipe`'s error for sources outside the project root stays.
