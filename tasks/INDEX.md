@@ -11,8 +11,9 @@ This table replaces spec §10 for ordering. `A#` = item in `docs/spec/10-addendu
 | [T03](T03.md) | Pipeline fingerprints and staleness | §4.1, §4.2; A7 | T00, T01 | done |
 | [T04](T04.md) | Config loader, vocabulary, profiles, test seed config | §7, §4, §4.1, §6.4; A7, A9 | T01, T03 | done |
 | [T05](T05.md) | Fixture generator (first cut) and `project_basic` | §9, §6.2; A9, A10 | T01, T04 | done |
-| [T06](T06.md) | Recipe, gate fields, `Project` orchestrator, headless runner | §8, §4.1, §4.2, §2; A3, A7, A9, A10 | T02, T03, T04, T05 | todo |
-| [T10](T10.md) | Project setup & ingest inventory | §6.1 (03-ingest-names) | T06 | todo |
+| [T06a](T06.md) | Recipe, gate fields, migrations (T06 part 1) | §8, §4.1, §4.2, §2; A3, A7, A9, A10 | T02, T03, T04, T05 | done |
+| [T06b](T06b.md) | `Project` orchestrator, audit log, headless runner (T06 part 2) | §8, §4.1, §4.2; A3, A7, A9, A10 | T06a | todo |
+| [T10](T10.md) | Project setup & ingest inventory | §6.1 (03-ingest-names) | T06b | todo |
 | [T11](T11.md) | Input contract: shapes, column roles, transpose, numeric locale, header parsing | §6.2 (03-ingest-names); A3 | T10 | todo |
 | [T12](T12.md) | Result parsing & reshape to raw long | §6.2 (03-ingest-names); §5.2 (02-data-model); A3 | T11 | todo |
 | [T13](T13.md) | Harmonize: canonical fields, location dictionary, sample types | §6.3 (03-ingest-names); §5.3 (02-data-model); A3 | T12 | todo |
