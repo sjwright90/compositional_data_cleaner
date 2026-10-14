@@ -1,6 +1,6 @@
 # PROGRESS
 
-**State:** T00-T04 merged to `main`; T05 done on `feature/t05-fixture-generator` (awaiting review/merge). **Next:** T06 (`tasks/T06.md`).
+**State:** T00-T05 merged to `main`. **Next:** T06 (`tasks/T06.md`).
 
 ## Done
 - Spec split into `docs/spec/`, CLAUDE.md, path-scoped rules, task breakdown.
@@ -23,4 +23,6 @@
 - Follow-up (T06): the runner/recipe must surface the loader's `placeholder_config` warning item; recipe embeds `Vocabulary.snapshot(used)`.
 - Follow-up (T06/T33): `project_basic` has no recipe yet.
 - Follow-up (T11/T12): implement A14 (units/DL rows, optional header unit); fixture `lab_e_wide.xlsx` exercises the unlabelled fallback only.
+- Follow-up (T11): test A14 label-based row detection (`units_row_labels` / `dl_row_labels`) with small tmp_path files; `lab_e_wide.xlsx` only covers the unlabelled fallback.
+- Follow-up (before the first real-data run): review `config/defaults/` against §2 and §7 (e.g. the missing `blank_trip` sample-type alias).
 - Follow-up (T14/T15): custom-vocabulary creation must call `Vocabulary.check_new_analyte` / `check_new_unit`.
