@@ -87,3 +87,7 @@ Applied after pass 2 of `impute_censored`, to ND cells only:
 A non-detect with DL ≤ 0 (including `<0`) becomes `MISSING_ND_NO_DL` with reason "non-positive DL", counted and downloadable.
 - Parsing (T12, §6.2) records `<0` as an ND with DL = 0, without error or special handling.
 - Clean (T22, §6.5) applies the non-positive-DL rule.
+
+## A13. Config layering is additive
+**Fills a gap in:** §7 ("Overrides").
+Config layering is additive. The loader reads every layer that contains a given file, in layer order (shipped defaults first, then project). The fingerprint hashes all resolved files in that order (A7). Conflict rules per file type (e.g. duplicate vocab keys, overlapping JSON keys) are defined in T04.
