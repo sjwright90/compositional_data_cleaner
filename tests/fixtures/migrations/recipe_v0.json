@@ -1,0 +1,5 @@
+{
+  "schema_version": 0,
+  "sources": [{"file": "raw/lab_a.csv", "sha256": "abc123"}],
+  "stages": {"demo": {"threshold": 3}}
+}
