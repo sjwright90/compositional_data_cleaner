@@ -10,7 +10,7 @@ This table replaces spec §10 for ordering. `A#` = item in `docs/spec/10-addendu
 | [T02](T02.md) | Artifact containers and contracts | §4.1, §5.1, §5.2; A5, A6 | T01 | done |
 | [T03](T03.md) | Pipeline fingerprints and staleness | §4.1, §4.2; A7 | T00, T01 | done |
 | [T04](T04.md) | Config loader, vocabulary, profiles, test seed config | §7, §4, §4.1, §6.4; A7, A9 | T01, T03 | done |
-| [T05](T05.md) | Fixture generator (first cut) and `project_basic` | §9, §6.2; A9, A10 | T01, T04 | todo |
+| [T05](T05.md) | Fixture generator (first cut) and `project_basic` | §9, §6.2; A9, A10 | T01, T04 | done |
 | [T06](T06.md) | Recipe, gate fields, `Project` orchestrator, headless runner | §8, §4.1, §4.2, §2; A3, A7, A9, A10 | T02, T03, T04, T05 | todo |
 | [T10](T10.md) | Project setup & ingest inventory | §6.1 (03-ingest-names) | T06 | todo |
 | [T11](T11.md) | Input contract: shapes, column roles, transpose, numeric locale, header parsing | §6.2 (03-ingest-names); A3 | T10 | todo |
