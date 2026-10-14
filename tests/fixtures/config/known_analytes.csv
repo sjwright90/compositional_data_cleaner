@@ -4,3 +4,10 @@ Iron,fe,Fe;Iron Total,metal,Fe,Fe,fe,log,false,55.845,
 Nitrate,no3,NO3;Nitrate as NO3,anion,NO3,NO3,no3,log,false,62.004,-1
 pH,ph,pH Field,physchem,pH,pH,ph,none,false,,
 Eh,eh,ORP;Redox Potential,physchem,Eh,Eh,eh,none,true,,
+Calcium,ca,Ca,cation,Ca,Ca,ca,log,false,40.078,2
+Magnesium,mg,Mg,cation,Mg,Mg,mg,log,false,24.305,2
+Sodium,na,Na,cation,Na,Na,na,log,false,22.990,1
+Potassium,k,K,cation,K,K,k,log,false,39.098,1
+Chloride,cl,Cl,anion,Cl,Cl,cl,log,false,35.45,-1
+Sulfate,so4,SO4;Sulphate,anion,SO4,SO4,so4,log,false,96.06,-2
+Bicarbonate,hco3,HCO3;Alkalinity as HCO3,anion,HCO3,HCO3,hco3,log,false,61.017,-1

@@ -72,6 +72,7 @@ Do not write `app/` code until the U-tasks are reached in `tasks/INDEX.md`.
    to make it pass; if a test is wrong, say so in decisions.md and fix it explicitly.
 5. Commit with message `T<id>: <summary>`. One task per commit series.
 6. Update `PROGRESS.md` (done, next, open issues) and the task status in `tasks/INDEX.md`.
+7. After merging, update the PROGRESS.md state line in the same push.
 
 Stay inside the task's file list. If another module needs a change, note it in
 PROGRESS.md as a follow-up rather than editing it, unless the change is required for

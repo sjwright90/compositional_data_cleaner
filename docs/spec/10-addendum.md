@@ -92,3 +92,20 @@ A non-detect with DL ≤ 0 (including `<0`) becomes `MISSING_ND_NO_DL` with reas
 **Fills a gap in:** §7 ("Overrides").
 Config layering is additive. The loader reads every layer that contains a given file, in layer order (shipped defaults first, then project). The fingerprint hashes all resolved files in that order (A7). Conflict rules per file type (e.g. duplicate vocab keys, overlapping JSON keys) are defined in T04.
 - **Deferred addition (§11):** project layer cannot remove default list entries.
+
+## A14. Standard wide layout: units row, detection-limit row, header parsing
+**Fills gaps in:** §6.2 (wide shape, header parsing, result parsing).
+A wide sheet has one header row, then optionally a units row and a detection-limit (DL) row directly below it, then data rows.
+1. **DL row.**
+   - Per analyte column; it applies to every sample in that column and is stored as each cell's RL.
+   - An ND cell that carries its own value (e.g. `<0.01`) keeps it. If that value differs from the DL row's, emit an info `ReportItem`.
+   - Blank cells stay missing. The DL row never creates an ND.
+2. **Header and units row.**
+   - The header gives analyte and fraction. The units row gives the unit.
+   - If the header also contains a unit that disagrees with the units row, raise a blocking error.
+   - Header rules treat the unit as optional.
+3. **Detecting units and DL rows.**
+   - First, label match: the first metadata cell matches a keyword in `tokens.json` (`units_row_labels`, `dl_row_labels`; defaults `Units`/`Unit` and `LOR`/`RL`/`MDL`/`PQL`/`DL`).
+   - Otherwise, rows directly after the header whose metadata cells are all blank: a units row if its analyte cells resolve to known units; a DL row if every non-blank analyte cell is numeric.
+   - Any other unlabelled non-data row blocks with a plain-language message naming the file and row.
+   - Emit a `ReportItem` listing the detected rows, and record them in the recipe so replay uses the same rows.
