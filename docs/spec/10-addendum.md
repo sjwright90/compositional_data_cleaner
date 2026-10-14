@@ -91,3 +91,4 @@ A non-detect with DL ≤ 0 (including `<0`) becomes `MISSING_ND_NO_DL` with reas
 ## A13. Config layering is additive
 **Fills a gap in:** §7 ("Overrides").
 Config layering is additive. The loader reads every layer that contains a given file, in layer order (shipped defaults first, then project). The fingerprint hashes all resolved files in that order (A7). Conflict rules per file type (e.g. duplicate vocab keys, overlapping JSON keys) are defined in T04.
+- **Deferred addition (§11):** project layer cannot remove default list entries.
