@@ -1,6 +1,6 @@
 # PROGRESS
 
-**State:** T00-T05 merged to `main`; T06a on branch `feature/t06a-recipe-gates` (not merged). **Next:** T06b (`tasks/T06.md`, Project + audit + runner).
+**State:** T00-T06a merged to `main`. **Next:** T06b (`tasks/T06b.md`, Project + audit + runner).
 
 ## Done
 - Spec split into `docs/spec/`, CLAUDE.md, path-scoped rules, task breakdown.
@@ -27,3 +27,4 @@
 - Follow-up (T11): test A14 label-based row detection (`units_row_labels` / `dl_row_labels`) with small tmp_path files; `lab_e_wide.xlsx` only covers the unlabelled fallback.
 - Follow-up (before the first real-data run): review `config/defaults/` against §2 and §7 (e.g. the missing `blank_trip` sample-type alias).
 - Follow-up (T14/T15): custom-vocabulary creation must call `Vocabulary.check_new_analyte` / `check_new_unit`.
+- Follow-up (T11): `core/recipe.py` `gate_fields`/`unresolved_gates` recurse only into direct sub-model fields; gates inside lists or dicts of sub-models (e.g. per-source layout decisions, A14) are not discovered and need indexed paths like `sources[2].layout`.
