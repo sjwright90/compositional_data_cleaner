@@ -6,7 +6,7 @@ This table replaces spec §10 for ordering. `A#` = item in `docs/spec/10-addendu
 | ID | Title | Spec sections | Depends on | Status |
 |---|---|---|---|---|
 | [T00](T00.md) | Repo scaffold, check script, pipeline contract types, architecture tests | §4, §4.1, §3; A3, A4, A7 | – | done |
-| [T01](T01.md) | Identity layer (`core/ids.py`) | §4.1, §5.3, §2; §9 identity tests | T00 | todo |
+| [T01](T01.md) | Identity layer (`core/ids.py`) | §4.1, §5.3, §2; §9 identity tests | T00 | done |
 | [T02](T02.md) | Artifact containers and contracts | §4.1, §5.1, §5.2; A5, A6 | T01 | todo |
 | [T03](T03.md) | Pipeline fingerprints and staleness | §4.1, §4.2; A7 | T00, T01 | todo |
 | [T04](T04.md) | Config loader, vocabulary, profiles, test seed config | §7, §4, §4.1, §6.4; A7, A9 | T01, T03 | todo |
