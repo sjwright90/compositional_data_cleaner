@@ -1,0 +1,7 @@
+unit,unit_class,applies_to,column_suffix
+mg/L,concentration,water,mgL
+ug/L,concentration,water,ugL
+mg/L as N,concentration,water,mgL_N
+ppm,concentration,physical,ppm
+S.U.,ph,water,SU
+mV,potential,water,mV
