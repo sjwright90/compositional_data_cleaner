@@ -84,5 +84,7 @@ the current tests to pass.
 - DataFrame columns for features use `FeatureId.canonical()` internally; display names
   only at export/render time.
 - Tests: pytest + hypothesis. Fixtures come from the generator, never hand-edited CSVs.
+- Every new stage is added to `core/stages.py::STAGES` and gets a builder in
+  `tests/arch_inputs.py`; the architecture tests fail otherwise.
 - Determinism: seed everything (`random_state` from params); sorted iteration over sets
   and dicts wherever output order matters.
