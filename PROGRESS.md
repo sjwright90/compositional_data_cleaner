@@ -1,6 +1,6 @@
 # PROGRESS
 
-**State:** T00-T06b merged to `main`; T06c on `feature/t06c-checkpoint-fixes` (not merged). **Next:** merge T06c, then T10.
+**State:** T00-T06c merged to `main`. **Next:** T10.
 
 ## Done
 - Spec split into `docs/spec/`, CLAUDE.md, path-scoped rules, task breakdown.
