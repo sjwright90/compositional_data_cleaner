@@ -117,3 +117,33 @@ Sources are imported by copying into `<project>/sources/`. The recipe stores the
 - different content: copy as `<stem>_2<ext>` (then `_3`, …) and emit a warning `ReportItem` naming both files.
 
 Imported copies are never modified. `build_recipe`'s error for sources outside the project root stays.
+
+## A16. Single-line wide header (supersedes A14)
+**Supersedes:** A14. **Overrides:** §6.2 (wide shape: "one, plus an optional units row"; header parsing).
+Sam confirmed the real wide format: users tidy all header information onto ONE line. Reference layout:
+
+| Sample ID | Location | Date | Sample Type | Manganese_D_mg_L | Iron_D_mg_L | Iron_T_mg_L | pH_SU |
+|---|---|---|---|---|---|---|---|
+| E0002 | MW-3 | 2023-08-07 | Normal | <0.005 | 0.309 | 0.914 | 7.06 |
+
+(a) **Single header line.** An analyte header has the form `<analyte>[_<fraction>]_<unit>`. The parser enumerates every right-to-left split of the header into unit, optional fraction code and analyte, and keeps each split where all three resolve:
+   - unit: a unit alias in the units vocabulary (underscore spellings such as `mg_L`, `ug_L`, `uS_cm`, `SU` are aliases);
+   - fraction: a fraction code from config (`D`, `T`, …), or absent;
+   - analyte: an analyte name or alias in the vocabulary.
+
+   Outcome by number of valid splits:
+   - **Zero:** try the `header_rules.csv` fallback (§6.2 regex list). If that also gives no parse, the header is shown as unresolved (never guessed).
+   - **One:** use it.
+   - **More than one:** block, naming the header and the candidate splits.
+
+   The separator, fraction codes and unit aliases are config, not code.
+
+(b) **Defaults.** No fraction code → the analyte's default fraction from the vocabulary; if none is defined, block with a plain message (never guess). A missing unit blocks, except for analytes the vocabulary defines as dimensionless. If the vocabulary cannot yet express a default fraction or dimensionless, add the minimal fields and flag it in the relevant task plan.
+
+(c) **No units or DL rows.** An ND's DL comes from its own value (`<0.005`). Blanks stay missing and never become NDs. No-result tokens (e.g. `NM`) and GT values (`>1.5`) follow the existing rules (A5, Q11).
+
+(d) **Non-data rows.** Any non-data row between the header and the first data row blocks with a plain message naming the row and telling the user to put all header information on the header line.
+
+(e) **Tokens.** `tokens.json` `units_row_labels` and `dl_row_labels` are no longer needed: remove them from the `Tokens` model and from the fixture and default config.
+
+(f) **Fixtures.** The generator writes `lab_e_wide.xlsx` in exactly the reference layout above (Sam hand-edited the generated copy as the reference; it will be overwritten). Cases: a fraction-less `pH_SU` header, underscore unit aliases, a blank cell, `NM`, a GT value, and a new negative case `wide_multirow_header_blocks` (the old two-row units/DL form, in its own file) that must give the (d) message. `truth.json`, the case list and `REQUIRED_CASE_IDS` are updated; the case count changes (41 → 42).
