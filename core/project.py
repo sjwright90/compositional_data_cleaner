@@ -27,6 +27,8 @@ from pydantic import BaseModel
 from core import audit
 from core.audit import LogRow, LogType
 from core.config import DEFAULT_CONFIG_DIR, Config, ConfigError, config_layers, load_config
+from core.errors import ProjectError
+from core.ingest import SUPPORTED_SUFFIXES, UnsupportedSourceError
 from core.migrations import Migration
 from core.pipeline import (
     ReportItem,
@@ -64,8 +66,8 @@ ERROR_LOG_FILE = Path("log") / "errors.log"
 _META = "meta.json"
 
 
-class ProjectError(RuntimeError):
-    """Base for the project's own plain-language errors; the runner prints them as they are."""
+SOURCES_DIR = "sources"
+IMPORT_STAGE = "import"
 
 
 # Exceptions whose message is already written for the user; anything else is an internal error.
@@ -96,6 +98,30 @@ class DependencyNotCommittedError(ProjectError):
         )
 
 
+class SourceChangedError(ProjectError):
+    """A source copy no longer matches the SHA-256 recorded when it was imported."""
+
+    def __init__(self, path: str, recorded: str, found: str) -> None:
+        self.path = path
+        super().__init__(
+            f"The imported file '{path}' was changed after it was imported "
+            f"(recorded SHA-256 {recorded[:12]}, found {found[:12]}). Restore the original "
+            "file in the project's sources folder, or import the changed file again, before "
+            "running."
+        )
+
+
+class SourceMissingError(ProjectError):
+    """A source copy listed in the recipe is no longer in the project."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        super().__init__(
+            f"The imported file '{path}' is missing from the project's sources folder. "
+            "Put the file back, or import it again, before running."
+        )
+
+
 @dataclass(frozen=True)
 class Attention:
     """A decision that no longer matches anything (replay; implemented in T52)."""
@@ -114,6 +140,40 @@ def _write_json_atomic(path: Path, data: Any) -> None:
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text(text, encoding="utf-8", newline="\n")
+    os.replace(tmp, path)
+
+
+def _place_source(original: Path, digest: str, sources_dir: Path) -> tuple[Path, bool, str | None]:
+    """Find or create the copy of `original`: `(copy path, newly copied, clashing name or None)`.
+
+    Tries `<stem><ext>`, `<stem>_2<ext>`, ... in turn: an existing file with the same SHA-256 is
+    reused, a free name is filled through a temp file and rename, a different file is skipped.
+    The clashing name is the first same-named file that had different content.
+    """
+    clash: str | None = None
+    n = 1
+    while True:
+        name = f"{original.stem}{'' if n == 1 else f'_{n}'}{original.suffix}"
+        candidate = sources_dir / name
+        if not candidate.exists():
+            tmp = sources_dir / f".{name}.{uuid.uuid4().hex}.tmp"
+            try:
+                shutil.copyfile(original, tmp)
+                os.replace(tmp, candidate)
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
+            return candidate, True, clash
+        if file_sha256(candidate) == digest:
+            return candidate, False, clash
+        clash = clash or candidate.name
+        n += 1
 
 
 # ---- output (de)serialisation for the Parquet cache ----
@@ -280,6 +340,95 @@ class Project:
         )
         self._sources = tuple(recipe.sources)
 
+    def import_sources(self, paths: Sequence[Path]) -> tuple[ReportItem, ...]:
+        """Copy files into `<project>/sources/`, record them in the recipe and log the import (A15).
+
+        Explicit, disk-mutating user action: writes the recipe and the audit rows immediately.
+        Order is copy, then recipe (atomic), then log, so a crash leaves at worst an unlisted copy
+        that the next import of the same file re-adds.
+        """
+        originals = [Path(p) for p in paths]
+        unsupported = [p for p in originals if p.suffix.lower() not in SUPPORTED_SUFFIXES]
+        if unsupported:
+            raise UnsupportedSourceError(unsupported)
+        absent = [p for p in originals if not p.is_file()]
+        if absent:
+            listed = ", ".join(f"'{p}'" for p in absent)
+            raise FileNotFoundError(f"These files could not be found: {listed}.")
+        digests = [file_sha256(p) for p in originals]  # a locked file stops here, before any copy
+        disk = self._disk_recipe()  # a damaged recipe stops here, before any copy
+
+        sources_dir = self.root / SOURCES_DIR
+        sources_dir.mkdir(parents=True, exist_ok=True)
+        on_disk = {str(s["path"]) for s in disk.get("sources", [])}
+        in_memory = {s.path for s in self._sources}
+        added: list[SourceFile] = []
+        items: list[ReportItem] = []
+        rows: list[LogRow] = []
+        for original, digest in zip(originals, digests, strict=True):
+            target, copied, renamed_from = _place_source(original, digest, sources_dir)
+            rel = target.relative_to(self.root).as_posix()
+            known = (rel in on_disk and rel in in_memory) or any(a.path == rel for a in added)
+            params = {"original_path": str(original.resolve()), "sha256": digest}
+            if known:
+                items.append(ReportItem("source_unchanged", rel, 1, params))
+                continue
+            added.append(SourceFile(path=rel, sha256=file_sha256(target)))
+            warning: str | None = None
+            if copied and renamed_from is not None:
+                warning = (
+                    f"'{original.name}' has the same name as the already imported "
+                    f"'{renamed_from}' but different content, so it was imported as "
+                    f"'{target.name}'."
+                )
+            action = "source_imported" if copied else "source_readded"
+            items.append(ReportItem(action, rel, 1, params, warning=warning))
+            rows.append(
+                audit.new_row(
+                    IMPORT_STAGE,
+                    LogType.USER,
+                    "import_source",
+                    rel,
+                    {**params, "outcome": action},
+                    1,
+                    warnings=(warning,) if warning else (),
+                )
+            )
+        if added:
+            # Only the sources change on disk; in-memory params and gate decisions are not saved.
+            merged = {str(r["path"]): r for r in disk.get("sources", [])}
+            merged.update({a.path: a.model_dump(mode="json") for a in added})
+            disk["sources"] = [merged[k] for k in sorted(merged)]
+            _write_text_atomic(self.recipe_path, json.dumps(disk, indent=2, sort_keys=True) + "\n")
+            kept = {src.path: src for src in self._sources}
+            kept.update({a.path: a for a in added})
+            self._sources = tuple(kept[k] for k in sorted(kept))
+            self._append(rows)
+        logger.info("imported %d source(s), %d unchanged", len(added), len(items) - len(added))
+        return tuple(items)
+
+    def _disk_recipe(self) -> dict[str, Any]:
+        """The recipe as stored on disk, or a new default one when the file is absent."""
+        if not self.recipe_path.is_file():
+            seed = build_recipe(
+                project_root=self.root,
+                source_paths=[],
+                config_snapshot={},
+                settings=self._settings,
+                stages={name: s.Params() for name, s in self._stages.items()},
+            )
+            return dict(seed.model_dump(mode="json"))
+        try:
+            data = json.loads(self.recipe_path.read_text(encoding="utf-8"))
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            raise ProjectError(
+                f"The recipe file '{self.recipe_path.name}' could not be read, so no files were "
+                "imported. The file may be damaged."
+            )
+        return data
+
     def accept_defaults(self) -> list[str]:
         """Set every unresolved gate to an explicit accepted default; return the gate paths."""
         from core.recipe import accept_defaults as _accept
@@ -338,6 +487,8 @@ class Project:
 
     def _run(self, name: str, params: BaseModel, *, use_cache: bool) -> StageResult[Any]:
         stage = self._stage(name)
+        if not stage.depends_on:
+            self._verify_sources()
         missing = unresolved_gates(name, params)
         if missing:
             raise UnresolvedGatesError(missing)
@@ -361,6 +512,16 @@ class Project:
         if use_cache:
             self._memo[fp] = result
         return result
+
+    def _verify_sources(self) -> None:
+        """Every source copy must still match the SHA-256 in the recipe (A15)."""
+        for source in self._sources:
+            path = self.root / source.path
+            if not path.is_file():
+                raise SourceMissingError(source.path)
+            found = file_sha256(path)
+            if found != source.sha256:
+                raise SourceChangedError(source.path, source.sha256, found)
 
     def _inputs(self, stage: Any, dep_results: Mapping[str, StageResult[Any]]) -> Any:
         if not stage.depends_on:

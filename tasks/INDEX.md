@@ -14,7 +14,7 @@ This table replaces spec §10 for ordering. `A#` = item in `docs/spec/10-addendu
 | [T06a](T06.md) | Recipe, gate fields, migrations (T06 part 1) | §8, §4.1, §4.2, §2; A3, A7, A9, A10 | T02, T03, T04, T05 | done |
 | [T06b](T06b.md) | `Project` orchestrator, audit log, headless runner (T06 part 2) | §8, §4.1, §4.2; A3, A7, A9, A10 | T06a | done |
 | [T06c](T06c.md) | Checkpoint-1 fixes (log at commit, error paths, arch-test coverage, test strength) | §8, §4.1; A3, A7 | T06b | done |
-| [T10](T10.md) | Project setup & ingest inventory (A15 source import; no stage) | §6.1 (03-ingest-names); A15 | T06c | todo |
+| [T10](T10.md) | Project setup & ingest inventory (A15 source import; no stage) | §6.1 (03-ingest-names); A15 | T06c | done |
 | [T11a](T11a.md) | Shared plumbing: gates in lists/dicts, `Stage.suggest`, blocking severity, vocabulary usage (T11 part 1; no stage) | §4.1, §8 (08-config-audit); A3, A7 | T10 | todo |
 | [T11b](T11b.md) | A16 config fields, token removal, fixtures (T11 part 2; no stage) | §6.2, §7; A16(b)(e)(f), A9, A13 | T11a | todo |
 | [T11c](T11c.md) | Input contract stage: shapes, roles, transpose, locale, A16 header parsing (T11 part 3; first real stage) | §6.2 (03-ingest-names); A3, A16(a)(b)(d) | T11b | todo |
