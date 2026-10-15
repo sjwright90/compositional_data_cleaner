@@ -449,7 +449,9 @@ class Project:
         """Suggested gate values for the stage. Syncs, calls `suggest`, never writes.
 
         Works while gates are unresolved. A stage with `suggest` whose upstream is not runnable
-        yet returns no values; a stage without `suggest` whose upstream is not runnable raises
+        yet returns no values and one `upstream_not_runnable` info item per upstream stage with
+        unresolved gates (count and gate paths); a stage without `suggest` whose upstream is not
+        runnable raises
         `UnresolvedGatesError` naming the upstream gates.
         """
         self._sync_upto(name)
@@ -459,14 +461,23 @@ class Project:
         suggest = getattr(self._stage(name), "suggest", None)
         available, inputs = self._try_inputs(name)
         if not available:
+            blocked = {
+                n: gates
+                for n in sorted(self._ancestors(name))
+                if (gates := unresolved_gates(n, self._params[n], exclude=self._orphans.get(n, ())))
+            }
             if suggest is None:
-                pending = sorted(
-                    g
-                    for n in self._ancestors(name)
-                    for g in unresolved_gates(n, self._params[n], exclude=self._orphans.get(n, ()))
+                raise UnresolvedGatesError(sorted(g for gates in blocked.values() for g in gates))
+            notes = tuple(
+                ReportItem(
+                    "upstream_not_runnable",
+                    n,
+                    len(gates),
+                    {"gates": list(gates)},
                 )
-                raise UnresolvedGatesError(pending)
-            return SuggestResult({}, ())
+                for n, gates in blocked.items()
+            )
+            return SuggestResult({}, notes)
         if suggest is None:
             return SuggestResult({}, ())
         values = dict(suggest(inputs, params, self.vocab))

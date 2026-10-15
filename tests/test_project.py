@@ -77,6 +77,16 @@ def _snapshot(root: Path) -> dict[str, bytes]:
     }
 
 
+def _state_snapshot(root: Path) -> dict[str, bytes]:
+    """Every file under `root` except the disposable memo `cache/<stage>/...` (write-free
+    definition, docs/decisions.md). `cache/heads.json` is state and stays in the snapshot."""
+    return {
+        k: v
+        for k, v in _snapshot(root).items()
+        if "cache" not in k.split("/")[:-1] or k.endswith("cache/heads.json")
+    }
+
+
 def _commit_chain(p: Project) -> None:
     p.commit("alpha")
     p.set_params("beta", BetaParams(mode="keep"))
@@ -370,10 +380,10 @@ def test_notices_are_held_in_memory_and_construction_writes_nothing(
     root = tmp_path / "p2"
     root.mkdir()
     _old_recipe_with_drifted_default(root)
-    before = _snapshot(tmp_path)
+    before = _state_snapshot(tmp_path)
     first = Project(root, stages=STUBS, defaults_dir=defaults, recipe_registry={0: _v0_to_v1})
     Project(root, stages=STUBS, defaults_dir=defaults, recipe_registry={0: _v0_to_v1})
-    assert _snapshot(tmp_path) == before
+    assert _state_snapshot(tmp_path) == before
     assert not (root / "log").exists()
     actions = sorted(i.action for i in first.notices)
     assert actions == ["gate_default_changed", "migration", "placeholder_config"]
@@ -585,11 +595,11 @@ def test_construct_run_and_preview_change_nothing(
     project: Project, tmp_path: Path, defaults: Path
 ) -> None:
     project.import_sources([_incoming(tmp_path, "a.csv", "x\n1\n")])
-    before = _snapshot(project.root)
+    before = _state_snapshot(project.root)
     fresh = Project(project.root, stages=STUBS, defaults_dir=defaults)
-    assert _snapshot(project.root) == before
+    assert _state_snapshot(project.root) == before
     fresh.preview("alpha", AlphaParams(factor=3))
-    assert _snapshot(project.root) == before
+    assert _state_snapshot(project.root) == before
 
 
 def test_fresh_project_lists_imported_source_without_memory(
@@ -623,21 +633,21 @@ def test_unsupported_extension_refuses_whole_import(
 ) -> None:
     good = _incoming(tmp_path, "a.csv", "x\n1\n")
     unsupported = _incoming(tmp_path, bad, "junk")
-    before = _snapshot(project.root)
+    before = _state_snapshot(project.root)
     with pytest.raises(UnsupportedSourceError) as exc:
         project.import_sources([good, unsupported])
     assert str(unsupported) in str(exc.value)
     assert "save it as .xlsx or .csv" in str(exc.value)
     assert str(good) not in str(exc.value)
-    assert _snapshot(project.root) == before
+    assert _state_snapshot(project.root) == before
     assert project.current_recipe().sources == []
 
 
 def test_missing_input_file_is_plain_and_changes_nothing(project: Project, tmp_path: Path) -> None:
-    before = _snapshot(project.root)
+    before = _state_snapshot(project.root)
     with pytest.raises(FileNotFoundError, match="could not be found"):
         project.import_sources([tmp_path / "nope.csv"])
-    assert _snapshot(project.root) == before
+    assert _state_snapshot(project.root) == before
 
 
 # ---- source verification (A15) ----
@@ -892,18 +902,18 @@ def test_suggestions_work_while_gates_are_unresolved_and_write_nothing(
     tmp_path: Path, defaults: Path
 ) -> None:
     p = _mk(tmp_path, defaults, (Keys, Zeta))
-
-    def state() -> dict[str, bytes]:  # the derived cache may be filled by running upstream
-        return {k: v for k, v in _snapshot(p.root).items() if not k.startswith("cache/")}
-
-    before = state()
+    before = _state_snapshot(p.root)  # write-free: everything but the memo cache/<stage>/
     res = p.suggestions("zeta")
     assert res.values == {"entries[a].decision": "s_a:1", "entries[b].decision": "s_b:1"}
     assert [(i.action, i.target, i.params["value"]) for i in res.report] == [
         ("gate_suggestion", "zeta.entries[a].decision", "s_a:1"),
         ("gate_suggestion", "zeta.entries[b].decision", "s_b:1"),
     ]
-    assert state() == before
+    assert _state_snapshot(p.root) == before
+    assert p.unresolved_gates() == ["zeta.entries[a].decision", "zeta.entries[b].decision"]
+    assert _state_snapshot(p.root) == before
+    _mk(tmp_path, defaults, (Keys, Zeta))  # construction
+    assert _state_snapshot(p.root) == before
     with pytest.raises(UnresolvedGatesError):
         p.run_stage("zeta")
     with pytest.raises(UnresolvedGatesError):
@@ -947,7 +957,15 @@ def test_suggestions_for_suggest_stage_without_inputs_are_empty(
         depends_on: ClassVar[tuple[str, ...]] = ("gkeys",)
 
     p = _mk(tmp_path, defaults, (GatedKeys, DownZeta))
-    assert p.suggestions("dzeta").values == {}
+    res = p.suggestions("dzeta")
+    assert res.values == {}
+    assert [(i.action, i.target, i.count, list(i.params["gates"])) for i in res.report] == [
+        ("upstream_not_runnable", "gkeys", 1, ["gkeys.ok"])
+    ]
+    p.set_params("gkeys", GKParams(ok="y"))
+    assert p.suggestions("dzeta").report == () or all(
+        i.action == "gate_suggestion" for i in p.suggestions("dzeta").report
+    )
 
 
 def test_accept_defaults_stores_resolved_suggested_value_not_a_sentinel(
@@ -1002,16 +1020,12 @@ def test_blocking_item_is_returned_by_run_stage_and_refused_by_commit(
     p = _mk(tmp_path, defaults, (Eta,))
     result = p.run_stage("eta")
     assert [i.warning for i in result.report if i.blocking] == ["stub blocking problem"]
-    before = _snapshot(p.root)
+    before = _state_snapshot(p.root)
     with pytest.raises(BlockingItemsError) as exc:
         p.commit("eta")
     assert "stub blocking problem" in str(exc.value)
-    after = _snapshot(p.root)
-    assert {k for k in after if k.startswith(("checkpoints", "log"))} == set()
+    assert _state_snapshot(p.root) == before  # no checkpoint, log row or head
     assert not (p.root / "cache" / "heads.json").exists()
-    assert {k: v for k, v in after.items() if not k.startswith("cache/eta")} == {
-        k: v for k, v in before.items() if not k.startswith("cache/eta")
-    }
     assert p.heads == {}
 
 
