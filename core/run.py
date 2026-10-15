@@ -10,8 +10,11 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from core.config import DEFAULT_CONFIG_DIR, PLACEHOLDER_WARNING
-from core.project import Project
+from core.project import ERROR_LOG_FILE, PLAIN_ERRORS, Project, ProjectError
+from core.recipe import RecipeError
 from core.stages import STAGES
 
 logger = logging.getLogger(__name__)
@@ -24,7 +27,8 @@ _EPILOG = """\
 exit codes:
   0  success: every stage ran (or was unchanged) and was committed
   1  error: a locked file, an unreadable or unsupported recipe, bad configuration, or a
-     missing project folder; the message says what to fix
+     missing project folder (the message says what to fix); also an internal error in a
+     stage, whose traceback is appended to <project>/log/errors.log
   2  unresolved gates: the run stopped and listed every gate field that still needs a
      decision (set it in the recipe, or use --accept-defaults in tests)
 """
@@ -58,11 +62,28 @@ def _describe_error(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
 
 
+def _describe_problems(problems: Sequence[str], recipe_file: Path) -> str:
+    lines = [f"The recipe file '{recipe_file}' has settings that cannot be used:"]
+    lines.extend(f"  - {p}" for p in problems)
+    return "\n".join(lines)
+
+
 def main(argv: Sequence[str] | None = None, stages: Sequence[type[Any]] = STAGES) -> int:
     args = _parser().parse_args(argv)
     try:
         return _run(args, stages)
-    except (ValueError, OSError) as exc:
+    except (ValidationError, RecipeError) as exc:  # before ValueError: both are subclasses
+        recipe_file = args.recipe if args.recipe else args.project / "recipe.json"
+        if isinstance(exc, RecipeError):
+            problems = exc.problems
+        else:
+            problems = [
+                f"{'.'.join(str(p) for p in e['loc']) or '(whole file)'}: {e['msg']}"
+                for e in exc.errors(include_url=False, include_input=False)
+            ]
+        print(f"Error: {_describe_problems(problems, recipe_file)}", file=sys.stderr)
+        return EXIT_ERROR
+    except (ValueError, OSError, ProjectError) as exc:
         print(f"Error: {_describe_error(exc)}", file=sys.stderr)
         return EXIT_ERROR
 
@@ -73,6 +94,9 @@ def _run(args: argparse.Namespace, stages: Sequence[type[Any]]) -> int:
     )
     if project.placeholder:
         print(f"Note: {PLACEHOLDER_WARNING}.")
+    for item in project.notices:
+        if item.action != "placeholder_config":
+            print(f"Note: {item.warning or f'{item.action}: {item.target}'}")
 
     if args.accept_defaults:
         accepted = project.accept_defaults()
@@ -89,7 +113,20 @@ def _run(args: argparse.Namespace, stages: Sequence[type[Any]]) -> int:
         if project.heads.get(name) == project.fingerprint(name):
             print(f"{name}: unchanged, not recommitted")
             continue
-        checkpoint = project.commit(name)
+        try:
+            checkpoint = project.commit(name)
+        except PLAIN_ERRORS:
+            raise
+        except Exception as exc:  # unexpected: keep the traceback in the log, not on screen
+            project.record_error(name, exc)
+            detail = (str(exc).splitlines() or [""])[0]
+            summary = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+            print(
+                f"Internal error in stage {name}: {summary}; "
+                f"details in {args.project / ERROR_LOG_FILE}",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
         print(f"{name}: committed ({checkpoint.name})")
 
     unresolved = project.unresolved_gates()

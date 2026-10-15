@@ -15,9 +15,11 @@ from core.recipe import (
     AcceptDefault,
     Gate,
     Recipe,
+    RecipeError,
     RecipeSettings,
     SourceFile,
     accept_defaults,
+    assemble_recipe,
     build_recipe,
     gate_default_drift,
     gate_field,
@@ -142,6 +144,52 @@ def test_source_outside_project_root_is_rejected(tmp_path: Path) -> None:
             settings=RecipeSettings(min_obs_per_cell=3),
             stages={},
         )
+
+
+def test_assemble_recipe_rejects_paths_outside_project_like_build_recipe() -> None:
+    settings = RecipeSettings(min_obs_per_cell=3)
+    for bad in ("../x.csv", "/abs/x.csv", "C:/data/x.csv", "raw/../../x.csv"):
+        with pytest.raises(ValueError, match="inside the project folder"):
+            assemble_recipe(
+                sources=[SourceFile(path=bad, sha256="0" * 64)],
+                config_snapshot={},
+                settings=settings,
+                params={},
+            )
+
+
+def test_assemble_recipe_sorts_sources_and_dumps_params() -> None:
+    r = assemble_recipe(
+        sources=[
+            SourceFile(path="b.csv", sha256="1" * 64),
+            SourceFile(path="a.csv", sha256="2" * 64),
+        ],
+        config_snapshot={},
+        settings=RecipeSettings(min_obs_per_cell=3),
+        params={"demo": DemoParams()},
+    )
+    assert [s.path for s in r.sources] == ["a.csv", "b.csv"]
+    assert r.stages == {"demo": DemoParams().model_dump(mode="json")}
+
+
+def test_load_recipe_reports_stage_field_problems_with_path() -> None:
+    text = json.dumps(
+        {
+            "schema_version": 1,
+            "settings": {"min_obs_per_cell": 3},
+            "stages": {"demo": {"extra": "not a number"}},
+        }
+    )
+    with pytest.raises(RecipeError) as exc:
+        load_recipe(text, {"demo": DemoParams})
+    assert any(p.startswith("stages.demo.extra:") for p in exc.value.problems)
+
+
+def test_load_recipe_reports_top_level_problems() -> None:
+    text = json.dumps({"schema_version": 1, "settings": {"min_obs_per_cell": "many"}})
+    with pytest.raises(RecipeError) as exc:
+        load_recipe(text, {"demo": DemoParams})
+    assert any(p.startswith("settings.min_obs_per_cell:") for p in exc.value.problems)
 
 
 def test_recipe_round_trips(tmp_path: Path) -> None:

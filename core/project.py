@@ -12,6 +12,7 @@ import logging
 import os
 import platform
 import shutil
+import traceback
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -25,7 +26,7 @@ from pydantic import BaseModel
 
 from core import audit
 from core.audit import LogRow, LogType
-from core.config import DEFAULT_CONFIG_DIR, Config, config_layers, load_config
+from core.config import DEFAULT_CONFIG_DIR, Config, ConfigError, config_layers, load_config
 from core.migrations import Migration
 from core.pipeline import (
     ReportItem,
@@ -43,6 +44,7 @@ from core.recipe import (
     Recipe,
     RecipeSettings,
     SourceFile,
+    assemble_recipe,
     build_recipe,
     gate_fields,
     load_recipe,
@@ -58,10 +60,19 @@ logger = logging.getLogger(__name__)
 RECIPE_FILE = "recipe.json"
 LOG_FILE = Path("log") / "decisions.jsonl"
 HEADS_FILE = Path("cache") / "heads.json"
+ERROR_LOG_FILE = Path("log") / "errors.log"
 _META = "meta.json"
 
 
-class UnresolvedGatesError(RuntimeError):
+class ProjectError(RuntimeError):
+    """Base for the project's own plain-language errors; the runner prints them as they are."""
+
+
+# Exceptions whose message is already written for the user; anything else is an internal error.
+PLAIN_ERRORS: tuple[type[BaseException], ...] = (OSError, ProjectError, ConfigError)
+
+
+class UnresolvedGatesError(ProjectError):
     """A stage cannot run or commit because gate fields are still unresolved."""
 
     def __init__(self, fields: Sequence[str]) -> None:
@@ -69,6 +80,19 @@ class UnresolvedGatesError(RuntimeError):
         super().__init__(
             "These decisions still need an answer before the run can continue: "
             + ", ".join(self.fields)
+        )
+
+
+class DependencyNotCommittedError(ProjectError):
+    """A stage cannot be committed because a dependency is not DONE."""
+
+    def __init__(self, stage: str, dependency: str, status: str) -> None:
+        self.stage = stage
+        self.dependency = dependency
+        self.status = status
+        super().__init__(
+            f"Cannot commit '{stage}': its dependency '{dependency}' is {status}, so the result "
+            f"would rest on uncommitted output. Commit '{dependency}' first."
         )
 
 
@@ -167,6 +191,13 @@ class Project:
         self.root = Path(root)
         if not self.root.is_dir():
             raise FileNotFoundError(f"The project folder '{self.root}' does not exist.")
+        names = [cls.name for cls in stages]
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        if duplicates:
+            raise ValueError(
+                f"Stage name(s) registered more than once: {', '.join(duplicates)}. "
+                "Each stage must have a unique name."
+            )
         self._stages: dict[str, Any] = {cls.name: cls() for cls in stages}
         self._order = self._topological_order()
         self._layers = config_layers(Path(defaults_dir), self.root)
@@ -195,24 +226,20 @@ class Project:
         self._settings: RecipeSettings = loaded.recipe.settings
         self._params: dict[str, BaseModel] = dict(loaded.params)
 
-        init_rows: list[LogRow] = []
-        for item in loaded.report:
-            kind = LogType.MIGRATION if item.action == "migration" else LogType.AUTO_APPLIED
-            init_rows.extend(audit.rows_from_report("recipe", [item], kind))
-        init_rows.extend(
-            audit.rows_from_report(
-                "config",
-                [i for i in self.config.report if i.warning],
-                LogType.AUTO_APPLIED,
-            )
-        )
-        self._append(init_rows)
+        # Notices are held in memory; commit() writes them. Construction writes nothing.
+        self._notices: list[ReportItem] = list(loaded.report)
+        self._notices.extend(i for i in self.config.report if i.warning)
 
     # ---- introspection ----
 
     @property
     def params(self) -> Mapping[str, BaseModel]:
         return dict(self._params)
+
+    @property
+    def notices(self) -> tuple[ReportItem, ...]:
+        """Recipe-load and config notices (migration, gate drift, placeholder, warnings)."""
+        return tuple(self._notices)
 
     @property
     def placeholder(self) -> bool:
@@ -230,11 +257,11 @@ class Project:
         return sorted(g for n in self._order for g in unresolved_gates(n, self._params[n]))
 
     def current_recipe(self) -> Recipe:
-        return Recipe(
-            sources=list(self._sources),
-            config=self.vocab.snapshot(UsageTracker()),
+        return assemble_recipe(
+            sources=self._sources,
+            config_snapshot=self.vocab.snapshot(UsageTracker()),
             settings=self._settings,
-            stages={n: self._params[n].model_dump(mode="json") for n in sorted(self._params)},
+            params=self._params,
         )
 
     # ---- mutation of in-memory state (recipe) ----
@@ -400,12 +427,16 @@ class Project:
         except Exception as exc:  # any unreadable entry is a miss, never a crash
             logger.warning("cache entry %s is unreadable: %s", entry, exc)
             shutil.rmtree(entry, ignore_errors=True)
+            rel = entry.relative_to(self.root).as_posix()
             warn = ReportItem(
                 "cache_miss_unreadable",
                 name,
                 1,
-                {"fingerprint": fp},
-                warning=f"The saved result for '{name}' could not be read, so it was recomputed.",
+                {"fingerprint": fp, "entry": rel},
+                warning=(
+                    f"The saved result for '{name}' ({rel}) could not be read, "
+                    "so it was recomputed."
+                ),
             )
             return None, (warn,)
         return StageResult(output, items), ()
@@ -416,6 +447,14 @@ class Project:
         """Log one row per report item and per gate field, write an immutable checkpoint."""
         stage = self._stage(name)
         params = self._params[name]
+        missing = unresolved_gates(name, params)
+        if missing:
+            raise UnresolvedGatesError(missing)
+        if stage.depends_on:
+            status = self.staleness()
+            for dep in stage.depends_on:
+                if status[dep] is not Status.DONE:
+                    raise DependencyNotCommittedError(name, dep, status[dep].value)
         result = self.run_stage(name)
         fp = self.fingerprint(name)
 
@@ -463,7 +502,7 @@ class Project:
         }
         _write_json_atomic(ck / "manifest.json", manifest)
 
-        rows: list[LogRow] = []
+        rows: list[LogRow] = self._notice_rows(name)
         for path, _spec in sorted(gate_fields(type(params)).items()):
             value: Any = params
             for part in path.split("."):
@@ -492,6 +531,32 @@ class Project:
         logger.info("committed %s -> %s", name, ck.name)
         return ck
 
+    def _notice_rows(self, name: str) -> list[LogRow]:
+        """Rows for the notices that belong to this commit; migration notices are then cleared."""
+        rows: list[LogRow] = []
+        keep: list[ReportItem] = []
+        for item in self._notices:
+            if item.action == "migration":
+                rows.extend(audit.rows_from_report("recipe", [item], LogType.MIGRATION))
+            elif item.action == "gate_default_changed":
+                keep.append(item)
+                if item.target.split(".", 1)[0] == name:
+                    rows.extend(audit.rows_from_report(name, [item], LogType.AUTO_APPLIED))
+            else:  # config notices (placeholder, warnings) accompany every commit
+                keep.append(item)
+                rows.extend(audit.rows_from_report("config", [item], LogType.AUTO_APPLIED))
+        self._notices = keep
+        return rows
+
+    def record_error(self, stage: str, exc: BaseException) -> Path:
+        """Append an unexpected exception's traceback to `log/errors.log`; return its path."""
+        path = self.root / ERROR_LOG_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        body = "".join(traceback.format_exception(exc))
+        with open(path, "a", encoding="utf-8", newline="\n") as fh:
+            fh.write(f"=== {audit.utc_now_iso()} stage={stage} ===\n{body}\n")
+        return path
+
     def needs_attention(self) -> list[Attention]:
         """Stub: orphaned/unmatched decisions are matched on replay (T52)."""
         return []
@@ -502,8 +567,18 @@ class Project:
         path = self.root / LOG_FILE
         if not path.is_file():
             return []
-        text = path.read_text(encoding="utf-8")
-        return [audit.row_from_json(line) for line in text.splitlines() if line.strip()]
+        rows: list[LogRow] = []
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                rows.append(audit.row_from_json(line))
+            except ValueError as exc:
+                raise ValueError(
+                    f"The decision log '{path}' could not be read at line {number}: "
+                    f"{exc.__cause__ or exc}. The file may be damaged."
+                ) from exc
+        return rows
 
     def _append(self, rows: Sequence[LogRow]) -> None:
         if not rows:

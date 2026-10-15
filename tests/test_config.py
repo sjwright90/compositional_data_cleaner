@@ -299,7 +299,7 @@ class TestLayeringCsv:
         hdr = "from_unit,to_unit,factor,offset,analyte\n"
         _w(project, "conversions.csv", hdr + "mg/L,ug/L,1000.0,0.0,\n")
         cfg = _load(base, project)
-        assert len(cfg.conversions) == 4
+        assert len(cfg.conversions) == len(_column(base, "conversions.csv", "from_unit"))
         assert _actions(cfg) == ["config_row_ignored_identical"]
         _w(project, "conversions.csv", hdr + "mg/L,ug/L,999,0,\n")
         with pytest.raises(ConfigError, match=r"conversions\.csv.*mg/L.*ug/L"):
@@ -311,7 +311,8 @@ class TestLayeringCsv:
             "conversions.csv",
             "from_unit,to_unit,factor,offset,analyte\nmg/L as N,ug/L,4426,0,no3\n",
         )
-        assert len(_load(base, project).conversions) == 5
+        shipped = len(_column(base, "conversions.csv", "from_unit"))
+        assert len(_load(base, project).conversions) == shipped + 1
 
     def test_rule_files_concat_then_stable_sort_by_order(self, base: Path, project: Path) -> None:
         _w(project, "date_rules.csv", "order,source_pattern,regex,format\n1,,^x$,%d\n0,,^y$,%m\n")

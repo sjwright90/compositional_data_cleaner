@@ -8,10 +8,10 @@ import logging
 import types
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Generic, Literal, TypeVar, Union, get_args, get_origin
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from core.migrations import CURRENT, Migration, migrate
 from core.pipeline import ReportItem, canonical_json, file_sha256
@@ -166,6 +166,30 @@ class Recipe(BaseModel):
     stages: dict[str, dict[str, Any]] = Field(default_factory=dict)  # one section per stage
 
 
+def _check_source_path(path: str) -> None:
+    posix = PurePosixPath(path)
+    if posix.is_absolute() or PureWindowsPath(path).is_absolute() or ".." in posix.parts:
+        raise ValueError(f"Source file '{path}' must be inside the project folder.")
+
+
+def assemble_recipe(
+    *,
+    sources: Sequence[SourceFile],
+    config_snapshot: Mapping[str, Any],
+    settings: RecipeSettings,
+    params: Mapping[str, BaseModel],
+) -> Recipe:
+    """The single path that turns typed state into a `Recipe` (stage dicts are made here only)."""
+    for source in sources:
+        _check_source_path(source.path)
+    return Recipe(
+        sources=sorted(sources, key=lambda s: s.path),
+        config=dict(config_snapshot),
+        settings=settings,
+        stages={name: p.model_dump(mode="json") for name, p in sorted(params.items())},
+    )
+
+
 def build_recipe(
     *,
     project_root: Path,
@@ -185,12 +209,8 @@ def build_recipe(
                 f"Source file '{p}' must be inside the project folder '{root}'."
             ) from None
         sources.append(SourceFile(path=rel.as_posix(), sha256=file_sha256(resolved)))
-    sources.sort(key=lambda s: s.path)
-    return Recipe(
-        sources=sources,
-        config=dict(config_snapshot),
-        settings=settings,
-        stages={name: params.model_dump(mode="json") for name, params in sorted(stages.items())},
+    return assemble_recipe(
+        sources=sources, config_snapshot=config_snapshot, settings=settings, params=stages
     )
 
 
@@ -200,6 +220,22 @@ def recipe_hash(recipe: Recipe) -> str:
 
 def recipe_to_json(recipe: Recipe) -> str:
     return json.dumps(recipe.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
+
+
+class RecipeError(ValueError):
+    """The recipe holds settings that cannot be used; `problems` are `<field path>: <message>`."""
+
+    def __init__(self, problems: Sequence[str]) -> None:
+        self.problems = list(problems)
+        super().__init__("The recipe has settings that cannot be used: " + "; ".join(problems))
+
+
+def _problems(exc: ValidationError, prefix: str = "") -> list[str]:
+    out: list[str] = []
+    for err in exc.errors(include_url=False, include_input=False):
+        path = ".".join([*([prefix] if prefix else []), *(str(p) for p in err["loc"])])
+        out.append(f"{path or '(whole file)'}: {err['msg']}")
+    return out
 
 
 @dataclass(frozen=True)
@@ -218,7 +254,10 @@ def load_recipe(
     """Parse, migrate and validate a recipe; report migrations and gate-default drift."""
     raw = json.loads(text)
     migrated, report = migrate(raw, registry=registry)
-    recipe = Recipe.model_validate(migrated)
+    try:
+        recipe = Recipe.model_validate(migrated)
+    except ValidationError as exc:
+        raise RecipeError(_problems(exc)) from exc
     unknown = sorted(set(recipe.stages) - set(stage_params))
     if unknown:
         raise ValueError(
@@ -226,7 +265,14 @@ def load_recipe(
         )
     params: dict[str, BaseModel] = {}
     drift: list[ReportItem] = []
+    problems: list[str] = []
     for name, cls in sorted(stage_params.items()):
-        params[name] = cls.model_validate(recipe.stages.get(name, {}))
+        try:
+            params[name] = cls.model_validate(recipe.stages.get(name, {}))
+        except ValidationError as exc:
+            problems.extend(_problems(exc, f"stages.{name}"))
+            continue
         drift.extend(gate_default_drift(name, params[name]))
+    if problems:
+        raise RecipeError(problems)
     return LoadedRecipe(recipe, params, (*report, *drift))
