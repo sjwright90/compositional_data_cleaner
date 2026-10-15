@@ -4,13 +4,22 @@ import hashlib
 import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from core import project as project_module
 from core.audit import LogRow
-from core.pipeline import Status
-from core.project import DependencyNotCommittedError, Project, UnresolvedGatesError
-from core.recipe import AcceptDefault
+from core.ingest import UnsupportedSourceError
+from core.pipeline import Status, canonical_json
+from core.project import (
+    DependencyNotCommittedError,
+    Project,
+    SourceChangedError,
+    SourceMissingError,
+    UnresolvedGatesError,
+)
+from core.recipe import AcceptDefault, recipe_hash
 from tests import stub_stages
 from tests.stub_stages import (
     STUBS,
@@ -476,3 +485,197 @@ def test_current_recipe_matches_build_recipe(project: Project) -> None:
         stages=dict(project.params),
     )
     assert project.current_recipe() == expected
+
+
+# ---- import_sources (A15, A17) ----
+
+
+def _incoming(tmp_path: Path, name: str, text: str, folder: str = "incoming") -> Path:
+    p = tmp_path / folder / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8", newline="\n")
+    return p
+
+
+def _recipe_sources(root: Path) -> list[dict[str, str]]:
+    data = json.loads((root / "recipe.json").read_text(encoding="utf-8"))
+    return list(data["sources"])
+
+
+def test_import_copies_hashes_and_lists_in_recipe(project: Project, tmp_path: Path) -> None:
+    src = _incoming(tmp_path, "a.csv", "x\n1\n")
+    (item,) = project.import_sources([src])
+    copy = project.root / "sources" / "a.csv"
+    assert copy.read_bytes() == src.read_bytes()
+    assert item.action == "source_imported"
+    assert item.warning is None
+    assert _recipe_sources(project.root) == [
+        {"path": "sources/a.csv", "sha256": hashlib.sha256(src.read_bytes()).hexdigest()}
+    ]
+    assert not list((project.root / "sources").glob(".*.tmp"))
+
+
+def test_import_same_file_twice_is_one_copy_and_info_item(project: Project, tmp_path: Path) -> None:
+    src = _incoming(tmp_path, "a.csv", "x\n1\n")
+    project.import_sources([src])
+    (item,) = project.import_sources([src])
+    assert item.action == "source_unchanged"
+    assert item.warning is None
+    assert [p.name for p in (project.root / "sources").iterdir()] == ["a.csv"]
+    assert len(_recipe_sources(project.root)) == 1
+    assert len(project.log_rows()) == 1  # a pure no-op writes no row
+
+
+def test_same_name_different_content_gets_numbered_copies(project: Project, tmp_path: Path) -> None:
+    first = _incoming(tmp_path, "a.csv", "x\n1\n")
+    second = _incoming(tmp_path, "a.csv", "x\n2\n", folder="other")
+    third = _incoming(tmp_path, "a.csv", "x\n3\n", folder="third")
+    project.import_sources([first])
+    (item2,) = project.import_sources([second])
+    (item3,) = project.import_sources([third])
+    src_dir = project.root / "sources"
+    assert (src_dir / "a.csv").read_text(encoding="utf-8") == "x\n1\n"
+    assert (src_dir / "a_2.csv").read_text(encoding="utf-8") == "x\n2\n"
+    assert (src_dir / "a_3.csv").read_text(encoding="utf-8") == "x\n3\n"
+    assert item2.warning is not None
+    assert "'a.csv'" in item2.warning and "'a_2.csv'" in item2.warning
+    assert item3.warning is not None and "'a_3.csv'" in item3.warning
+    (again,) = project.import_sources([second])  # matches a_2 by content: no a_4
+    assert again.action == "source_unchanged"
+    assert sorted(p.name for p in src_dir.iterdir()) == ["a.csv", "a_2.csv", "a_3.csv"]
+
+
+def test_recipe_is_machine_independent(tmp_path: Path, defaults: Path) -> None:
+    hashes = []
+    for place in ("one", "deeper/two"):
+        root = tmp_path / place / "proj"
+        root.mkdir(parents=True)
+        p = Project(root, stages=STUBS, defaults_dir=defaults)
+        p.import_sources([_incoming(tmp_path, "a.csv", "x\n1\n", folder=f"in_{place}")])
+        text = (root / "recipe.json").read_text(encoding="utf-8")
+        assert str(tmp_path) not in text and "\\" not in text
+        hashes.append(recipe_hash(p.current_recipe()))
+    assert hashes[0] == hashes[1]
+
+
+def test_import_logs_one_row_per_file_with_original_path(project: Project, tmp_path: Path) -> None:
+    a = _incoming(tmp_path, "a.csv", "x\n1\n")
+    b = _incoming(tmp_path, "b.csv", "x\n2\n")
+    project.import_sources([a, b])
+    rows = project.log_rows()
+    assert [r.target for r in rows] == ["sources/a.csv", "sources/b.csv"]
+    assert [r.parameters["original_path"] for r in rows] == [str(a.resolve()), str(b.resolve())]
+    assert all(r.stage == "import" and r.action == "import_source" and r.timestamp for r in rows)
+
+
+def test_construct_run_and_preview_change_nothing(
+    project: Project, tmp_path: Path, defaults: Path
+) -> None:
+    project.import_sources([_incoming(tmp_path, "a.csv", "x\n1\n")])
+    before = _snapshot(project.root)
+    fresh = Project(project.root, stages=STUBS, defaults_dir=defaults)
+    assert _snapshot(project.root) == before
+    fresh.preview("alpha", AlphaParams(factor=3))
+    assert _snapshot(project.root) == before
+
+
+def test_fresh_project_lists_imported_source_without_memory(
+    project: Project, tmp_path: Path, defaults: Path
+) -> None:
+    project.import_sources([_incoming(tmp_path, "a.csv", "x\n1\n")])
+    fresh = Project(project.root, stages=STUBS, defaults_dir=defaults)
+    assert [s.path for s in fresh.current_recipe().sources] == ["sources/a.csv"]
+
+
+def test_reimport_of_unlisted_copy_readds_it(
+    project: Project, tmp_path: Path, defaults: Path
+) -> None:
+    src = _incoming(tmp_path, "a.csv", "x\n1\n")
+    project.import_sources([src])
+    (project.root / "recipe.json").unlink()  # crash after copy, before the recipe write
+    (project.root / "log" / "decisions.jsonl").unlink()
+    fresh = Project(project.root, stages=STUBS, defaults_dir=defaults)
+    assert fresh.current_recipe().sources == []
+    (item,) = fresh.import_sources([src])
+    assert item.action == "source_readded"
+    assert item.warning is None
+    assert [p.name for p in (project.root / "sources").iterdir()] == ["a.csv"]
+    assert [s.path for s in fresh.current_recipe().sources] == ["sources/a.csv"]
+    assert len(fresh.log_rows()) == 1
+
+
+@pytest.mark.parametrize("bad", ["old.xls", "OLD.XLS", "data.parquet", "notes.txt"])
+def test_unsupported_extension_refuses_whole_import(
+    project: Project, tmp_path: Path, bad: str
+) -> None:
+    good = _incoming(tmp_path, "a.csv", "x\n1\n")
+    unsupported = _incoming(tmp_path, bad, "junk")
+    before = _snapshot(project.root)
+    with pytest.raises(UnsupportedSourceError) as exc:
+        project.import_sources([good, unsupported])
+    assert str(unsupported) in str(exc.value)
+    assert "save it as .xlsx or .csv" in str(exc.value)
+    assert str(good) not in str(exc.value)
+    assert _snapshot(project.root) == before
+    assert project.current_recipe().sources == []
+
+
+def test_missing_input_file_is_plain_and_changes_nothing(project: Project, tmp_path: Path) -> None:
+    before = _snapshot(project.root)
+    with pytest.raises(FileNotFoundError, match="could not be found"):
+        project.import_sources([tmp_path / "nope.csv"])
+    assert _snapshot(project.root) == before
+
+
+# ---- source verification (A15) ----
+
+
+def test_changed_source_blocks_root_stage_until_restored(project: Project, tmp_path: Path) -> None:
+    project.import_sources([_incoming(tmp_path, "a.csv", "x\n1\n")])
+    _accept_beta(project)
+    project.run_stage("alpha")  # now cached and memoised
+    copy = project.root / "sources" / "a.csv"
+    original = copy.read_bytes()
+    copy.write_bytes(b"x\n999\n")
+    for call in (
+        lambda: project.run_stage("alpha"),
+        lambda: project.preview("alpha", AlphaParams()),
+        lambda: project.run_stage("beta"),
+    ):
+        with pytest.raises(SourceChangedError, match=r"sources/a\.csv.*changed after") as exc:
+            call()
+        assert hashlib.sha256(original).hexdigest()[:12] in str(exc.value)
+    copy.write_bytes(original)
+    assert project.run_stage("alpha").output["n_sources"].iloc[0] == 1
+
+
+def test_missing_source_copy_has_its_own_message(project: Project, tmp_path: Path) -> None:
+    project.import_sources([_incoming(tmp_path, "a.csv", "x\n1\n")])
+    (project.root / "sources" / "a.csv").unlink()
+    with pytest.raises(SourceMissingError, match=r"sources/a\.csv.*missing"):
+        project.run_stage("alpha")
+
+
+# ---- golden root fingerprint payload ----
+
+
+def test_root_fingerprint_payload_shape_is_pinned(
+    project: Project, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a = _incoming(tmp_path, "a.csv", "x\n1\n")
+    b = _incoming(tmp_path, "b.csv", "x\n2\n")
+    project.import_sources([b, a])
+    seen: dict[str, str] = {}
+    real = project_module._fingerprint
+
+    def spy(stage: Any, payload: Any, deps: Any, cfg: str) -> str:
+        if stage.name == "alpha":
+            seen["payload"] = canonical_json(payload)
+        return real(stage, payload, deps, cfg)
+
+    monkeypatch.setattr(project_module, "_fingerprint", spy)
+    project.fingerprint("alpha")
+    ha, hb = (hashlib.sha256(p.read_bytes()).hexdigest() for p in (a, b))
+    assert seen["payload"] == (
+        f'{{"params":{{"factor":1}},"sources":[["sources/a.csv","{ha}"],["sources/b.csv","{hb}"]]}}'
+    )
