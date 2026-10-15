@@ -162,6 +162,7 @@ def test_help_documents_exit_codes() -> None:
     for code, word in (("0", "success"), ("1", "error"), ("2", "unresolved gates")):
         assert re.search(rf"^\s+{code}\s+{word}\b", res.stdout, re.MULTILINE), (code, word)
     assert "tests only (A3)" in res.stdout
+    assert "blocking problems" in res.stdout
 
 
 def test_second_run_adds_no_log_rows(proj: Path, defaults: Path) -> None:
@@ -210,6 +211,42 @@ def _raising_stage(label: str, exc: Exception) -> type[Any]:
             raise exc
 
     return _Raising
+
+
+def test_blocking_item_exit_1_prints_item_and_commits_nothing(
+    proj: Path, defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["--project", str(proj)], stages=(stub_stages.Eta,)) == 1
+    err = capsys.readouterr().err
+    assert "Blocked: eta: stub blocking problem" in err
+    assert "Internal error" not in err
+    assert _checkpoints(proj, "eta") == []
+    assert not (proj / "cache" / "heads.json").exists()
+    assert not (proj / "log" / "decisions.jsonl").exists()
+
+
+def test_unresolved_synced_gates_still_exit_2_with_suggestions_listed(
+    proj: Path, defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stages = (stub_stages.Keys, stub_stages.Zeta)
+    assert main(["--project", str(proj)], stages=stages) == 2
+    out = capsys.readouterr().out
+    assert "zeta.entries[a].decision (suggested: 's_a:1')" in out
+    assert "zeta.entries[b].decision (suggested: 's_b:1')" in out
+    assert _checkpoints(proj, "zeta") == []
+
+
+def test_accept_defaults_resolves_synced_suggested_gates(
+    proj: Path, defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stages = (stub_stages.Keys, stub_stages.Zeta)
+    assert main(["--project", str(proj), "--accept-defaults"], stages=stages) == 0
+    recipe = json.loads((proj / "recipe.json").read_text(encoding="utf-8"))
+    assert recipe["stages"]["zeta"]["entries"]["a"]["decision"] == {
+        "accept_default": True,
+        "value": "s_a:1",
+    }
+    assert len(_checkpoints(proj, "zeta")) == 1
 
 
 def test_unexpected_stage_error_is_logged_not_printed(

@@ -6,8 +6,9 @@ orchestrator owns; `snapshot(used)` returns only the entries it recorded.
 
 from __future__ import annotations
 
+import dataclasses
 import difflib
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -41,6 +42,45 @@ class UsageTracker:
     thresholds: set[str] = field(default_factory=set)
     tokens: set[str] = field(default_factory=set)
     flag_codes: set[str] = field(default_factory=set)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "analytes": sorted(self.analytes),
+            "units": sorted(self.units),
+            "conversions": sorted([list(c) for c in self.conversions]),
+            "date_rules": self.date_rules,
+            "header_rules": self.header_rules,
+            "thresholds": sorted(self.thresholds),
+            "tokens": sorted(self.tokens),
+            "flag_codes": sorted(self.flag_codes),
+        }
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> UsageTracker:
+        return cls(
+            analytes=set(data["analytes"]),
+            units=set(data["units"]),
+            conversions={(a, b, c) for a, b, c in data["conversions"]},
+            date_rules=bool(data["date_rules"]),
+            header_rules=bool(data["header_rules"]),
+            thresholds=set(data["thresholds"]),
+            tokens=set(data["tokens"]),
+            flag_codes=set(data["flag_codes"]),
+        )
+
+    @classmethod
+    def union(cls, trackers: Iterable[UsageTracker]) -> UsageTracker:
+        out = cls()
+        for t in trackers:
+            out.analytes |= t.analytes
+            out.units |= t.units
+            out.conversions |= t.conversions
+            out.date_rules = out.date_rules or t.date_rules
+            out.header_rules = out.header_rules or t.header_rules
+            out.thresholds |= t.thresholds
+            out.tokens |= t.tokens
+            out.flag_codes |= t.flag_codes
+        return out
 
 
 @dataclass(frozen=True)
@@ -79,10 +119,19 @@ class Vocabulary:
     """Defaults layered with project overrides, resolved once per run."""
 
     config: Config
+    _tracker: UsageTracker | None = field(default=None, repr=False, compare=False)
+
+    def tracking(self, tracker: UsageTracker) -> Vocabulary:
+        """View whose lookups record into `tracker` when no explicit `used=` is given."""
+        return dataclasses.replace(self, _tracker=tracker)
+
+    def _used(self, used: UsageTracker | None) -> UsageTracker | None:
+        return used if used is not None else self._tracker
 
     # -- core lookups -------------------------------------------------------------
 
     def analyte(self, key: str, *, used: UsageTracker | None = None) -> Analyte:
+        used = self._used(used)
         nkey = _tok(key)
         for a in self.config.analytes:
             if _tok(a.key) == nkey:
@@ -92,6 +141,7 @@ class Vocabulary:
         raise UnknownAnalyteError(key)
 
     def unit(self, key: str, *, used: UsageTracker | None = None) -> Unit:
+        used = self._used(used)
         nkey = _tok(key)
         for u in self.config.units:
             if _tok(u.unit) == nkey:
@@ -109,6 +159,7 @@ class Vocabulary:
         used: UsageTracker | None = None,
     ) -> Conversion | None:
         """Analyte-specific row, else generic row, else None. Never guessed (§6.4)."""
+        used = self._used(used)
         wanted = [(_tok(frm), _tok(to), _tok(analyte))] if analyte else []
         wanted.append((_tok(frm), _tok(to), ""))
         by_key = {
@@ -125,11 +176,13 @@ class Vocabulary:
     # -- other configuration reads ---------------------------------------------------
 
     def date_rules(self, *, used: UsageTracker | None = None) -> tuple[DateRuleRow, ...]:
+        used = self._used(used)
         if used is not None:
             used.date_rules = True
         return self.config.date_rules
 
     def header_rules(self, *, used: UsageTracker | None = None) -> tuple[HeaderRuleRow, ...]:
+        used = self._used(used)
         if used is not None:
             used.header_rules = True
         return self.config.header_rules
@@ -137,6 +190,7 @@ class Vocabulary:
     def threshold(self, name: str, *, used: UsageTracker | None = None) -> Any:
         if name not in type(self.config.qa_thresholds).model_fields:
             raise KeyError(f"Unknown QA threshold {name!r}.")
+        used = self._used(used)
         if used is not None:
             used.thresholds.add(name)
         value = getattr(self.config.qa_thresholds, name)
@@ -145,11 +199,13 @@ class Vocabulary:
     def token(self, name: str, *, used: UsageTracker | None = None) -> Any:
         if name not in type(self.config.tokens).model_fields:
             raise KeyError(f"Unknown token setting {name!r}.")
+        used = self._used(used)
         if used is not None:
             used.tokens.add(name)
         return getattr(self.config.tokens, name)
 
     def flag_action(self, code: str, *, used: UsageTracker | None = None) -> str | None:
+        used = self._used(used)
         norm = normalise_code(code)
         action = self.config.flag_map.get(norm)
         if action is not None and used is not None:

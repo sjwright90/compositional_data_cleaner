@@ -127,3 +127,47 @@ class TestSnapshot:
             vocab.analyte("fe", used=u)
             vocab.analyte("mn", used=u)
         assert vocab.snapshot(a) == vocab.snapshot(b)
+
+
+# ---- tracking view and tracker serialisation (T11a) ----
+
+
+def test_tracking_view_records_lookups_without_explicit_used(vocab: Vocabulary) -> None:
+    tracker = UsageTracker()
+    view = vocab.tracking(tracker)
+    view.analyte("mn")
+    view.unit("mg/L")
+    view.threshold("min_obs_per_cell")
+    view.token("no_result_tokens")
+    view.date_rules()
+    assert tracker.analytes == {"mn"}
+    assert len(tracker.units) == 1
+    assert tracker.thresholds == {"min_obs_per_cell"}
+    assert tracker.tokens == {"no_result_tokens"}
+    assert tracker.date_rules
+
+
+def test_plain_vocabulary_records_nothing_and_view_equals_base(vocab: Vocabulary) -> None:
+    tracker = UsageTracker()
+    view = vocab.tracking(tracker)
+    assert view == vocab
+    vocab.analyte("mn")
+    assert tracker == UsageTracker()
+
+
+def test_explicit_used_wins_over_the_tracking_view(vocab: Vocabulary) -> None:
+    view_tracker, explicit = UsageTracker(), UsageTracker()
+    vocab.tracking(view_tracker).analyte("mn", used=explicit)
+    assert explicit.analytes == {"mn"}
+    assert view_tracker.analytes == set()
+
+
+def test_tracker_json_round_trip_and_union() -> None:
+    a = UsageTracker(analytes={"mn"}, conversions={("mg/l", "ug/l", "")}, date_rules=True)
+    b = UsageTracker(analytes={"fe"}, tokens={"t"}, flag_codes={"j"})
+    assert UsageTracker.from_json(a.to_json()) == a
+    merged = UsageTracker.union([a, b])
+    assert merged.analytes == {"mn", "fe"} and merged.date_rules
+    assert merged.conversions == {("mg/l", "ug/l", "")}
+    assert merged.tokens == {"t"} and merged.flag_codes == {"j"}
+    assert UsageTracker.union([]) == UsageTracker()

@@ -13,6 +13,7 @@ from core.audit import LogRow
 from core.ingest import UnsupportedSourceError
 from core.pipeline import Status, canonical_json
 from core.project import (
+    BlockingItemsError,
     DependencyNotCommittedError,
     Project,
     SourceChangedError,
@@ -26,8 +27,20 @@ from tests.stub_stages import (
     STUBS_WITH_GAMMA,
     Alpha,
     AlphaParams,
+    Beta,
     BetaOut,
     BetaParams,
+    Delta,
+    DeltaParams,
+    Entry,
+    Eta,
+    EtaParams,
+    Keys,
+    KeysParams,
+    MapEntry,
+    SheetDecision,
+    Zeta,
+    ZetaParams,
 )
 
 FIXTURE_CONFIG = Path(__file__).resolve().parent / "fixtures" / "config"
@@ -720,3 +733,370 @@ def test_readd_logs_one_row_and_true_noop_logs_none(project: Project, tmp_path: 
     assert rows[-1].parameters["outcome"] == "source_readded"
     fresh.import_sources([src])  # now a no-op again
     assert len(fresh.log_rows()) == 2
+
+
+# ---- T11a plumbing: gates in collections, suggest, sync_params, blocking, usage ----
+
+
+def _mk(tmp_path: Path, defaults: Path, stages: Any) -> Project:
+    root = tmp_path / "proj"
+    root.mkdir(exist_ok=True)
+    return Project(root, stages=stages, defaults_dir=defaults)
+
+
+def _zeta(p: Project, name: str = "zeta") -> ZetaParams:
+    params = p.params[name]
+    assert isinstance(params, ZetaParams)
+    return params
+
+
+def _entries(params: Any) -> dict[str, Entry]:
+    assert isinstance(params, ZetaParams)
+    return params.entries
+
+
+def _decide(p: Project, **decisions: str) -> None:
+    entries = {k: Entry(decision=v) for k, v in decisions.items()}
+    p.set_params("zeta", ZetaParams(entries=entries))
+
+
+def test_collection_gates_listed_accepted_and_logged_per_indexed_path(
+    tmp_path: Path, defaults: Path
+) -> None:
+    p = _mk(tmp_path, defaults, (Delta,))
+    p.set_params(
+        "delta",
+        DeltaParams(
+            sheets=[SheetDecision(), SheetDecision(layout="long")],
+            maps={"mn": MapEntry()},
+        ),
+    )
+    assert p.unresolved_gates() == ["delta.maps[mn].unit", "delta.sheets[0].layout"]
+    with pytest.raises(UnresolvedGatesError) as exc:
+        p.commit("delta")
+    assert exc.value.fields == ["delta.maps[mn].unit", "delta.sheets[0].layout"]
+    assert p.accept_defaults() == ["delta.maps[mn].unit", "delta.sheets[0].layout"]
+    p.commit("delta")
+    gates = {r.target: r.type for r in _by_stage(p.log_rows(), "delta") if r.action == "gate"}
+    assert gates == {
+        "delta.maps[mn].unit": "default-accepted",
+        "delta.sheets[0].layout": "default-accepted",
+        "delta.sheets[1].layout": "user",
+    }
+
+
+def test_collection_gate_drift_names_indexed_path(tmp_path: Path, defaults: Path) -> None:
+    p = _mk(tmp_path, defaults, (Delta,))
+    p.set_params(
+        "delta",
+        DeltaParams(sheets=[SheetDecision(layout=AcceptDefault(accept_default=True, value="old"))]),
+    )
+    p.write_recipe()
+    again = _mk(tmp_path, defaults, (Delta,))
+    assert [n.target for n in again.notices if n.action == "gate_default_changed"] == [
+        "delta.sheets[0].layout"
+    ]
+
+
+def test_sync_params_adds_entries_with_unresolved_gates(tmp_path: Path, defaults: Path) -> None:
+    p = _mk(tmp_path, defaults, (Keys, Zeta))
+    assert p.unresolved_gates() == ["zeta.entries[a].decision", "zeta.entries[b].decision"]
+    assert sorted(_zeta(p).entries) == ["a", "b"]
+    assert p.current_recipe().stages["zeta"]["entries"].keys() == {"a", "b"}
+
+
+def test_sync_keeps_decisions_and_syncing_twice_equals_once(tmp_path: Path, defaults: Path) -> None:
+    p = _mk(tmp_path, defaults, (Keys, Zeta))
+    _decide(p, a="drop")
+    p.sync_params()
+    once = p.params["zeta"]
+    p.sync_params()
+    assert p.params["zeta"] == once
+    assert _entries(once)["a"].decision == "drop"
+    assert _entries(once)["b"].decision is None
+
+
+def test_decided_orphan_is_kept_excluded_reported_and_ignored_by_run(
+    tmp_path: Path, defaults: Path
+) -> None:
+    p = _mk(tmp_path, defaults, (Keys, Zeta))
+    _decide(p, a="keep", b="drop")
+    p.set_params("keys", KeysParams(keys=["a"]))
+    assert p.unresolved_gates() == []
+    assert sorted(_zeta(p).entries) == ["a", "b"]  # orphan b kept in the recipe
+    result = p.run_stage("zeta")
+    assert list(result.output["key"]) == ["a"]
+    orphan_items = [i for i in result.report if i.action == "orphan_decisions"]
+    assert len(orphan_items) == 1
+    assert orphan_items[0].count == 1 and orphan_items[0].params["keys"] == ["entries[b]"]
+    p.commit("keys")
+    p.commit("zeta")
+    gate_targets = [r.target for r in _by_stage(p.log_rows(), "zeta") if r.action == "gate"]
+    assert gate_targets == ["zeta.entries[a].decision"]
+
+
+def test_undecided_orphan_is_dropped(tmp_path: Path, defaults: Path) -> None:
+    p = _mk(tmp_path, defaults, (Keys, Zeta))
+    _decide(p, a="keep")
+    p.sync_params()
+    assert sorted(_zeta(p).entries) == ["a", "b"]  # b added, undecided
+    p.set_params("keys", KeysParams(keys=["a"]))
+    p.sync_params()
+    assert sorted(_zeta(p).entries) == ["a"]
+
+
+def test_reappearing_key_reuses_old_decision_and_leaves_orphans(
+    tmp_path: Path, defaults: Path
+) -> None:
+    p = _mk(tmp_path, defaults, (Keys, Zeta))
+    _decide(p, a="keep", b="drop")
+    p.set_params("keys", KeysParams(keys=["a"]))
+    assert [i.action for i in p.run_stage("zeta").report if i.action == "orphan_decisions"]
+    p.set_params("keys", KeysParams(keys=["a", "b"]))
+    result = p.run_stage("zeta")
+    assert dict(zip(result.output["key"], result.output["decision"], strict=True)) == {
+        "a": "keep",
+        "b": "drop",
+    }
+    assert not [i for i in result.report if i.action == "orphan_decisions"]
+
+
+def test_dependent_entries_appear_only_when_upstream_is_runnable(
+    tmp_path: Path, defaults: Path
+) -> None:
+    from typing import ClassVar
+
+    from core.recipe import Gate, gate_field
+
+    class GKParams(KeysParams):
+        ok: Gate[str] = gate_field("y")
+
+    class GatedKeys(Keys):
+        name: ClassVar[str] = "gkeys"
+        Params: ClassVar[type[Any]] = GKParams
+
+    class DownZeta(Zeta):
+        name: ClassVar[str] = "dzeta"
+        depends_on: ClassVar[tuple[str, ...]] = ("gkeys",)
+
+    p = _mk(tmp_path, defaults, (GatedKeys, DownZeta))
+    assert p.unresolved_gates() == ["gkeys.ok"]
+    assert _zeta(p, "dzeta").entries == {}
+    assert p.staleness()["dzeta"] is Status.BLOCKED
+    p.set_params("gkeys", GKParams(ok="y"))
+    assert p.unresolved_gates() == ["dzeta.entries[a].decision", "dzeta.entries[b].decision"]
+    assert p.staleness()["dzeta"] is Status.BLOCKED  # upstream not committed yet
+
+
+def test_suggestions_work_while_gates_are_unresolved_and_write_nothing(
+    tmp_path: Path, defaults: Path
+) -> None:
+    p = _mk(tmp_path, defaults, (Keys, Zeta))
+
+    def state() -> dict[str, bytes]:  # the derived cache may be filled by running upstream
+        return {k: v for k, v in _snapshot(p.root).items() if not k.startswith("cache/")}
+
+    before = state()
+    res = p.suggestions("zeta")
+    assert res.values == {"entries[a].decision": "s_a:1", "entries[b].decision": "s_b:1"}
+    assert [(i.action, i.target, i.params["value"]) for i in res.report] == [
+        ("gate_suggestion", "zeta.entries[a].decision", "s_a:1"),
+        ("gate_suggestion", "zeta.entries[b].decision", "s_b:1"),
+    ]
+    assert state() == before
+    with pytest.raises(UnresolvedGatesError):
+        p.run_stage("zeta")
+    with pytest.raises(UnresolvedGatesError):
+        p.preview("zeta", p.params["zeta"])
+    p.commit("keys")
+    with pytest.raises(UnresolvedGatesError):
+        p.commit("zeta")
+
+
+def test_suggestions_raise_for_stage_without_suggest_when_upstream_not_runnable(
+    tmp_path: Path, defaults: Path
+) -> None:
+    from typing import ClassVar
+
+    class Beta2(Beta):
+        name: ClassVar[str] = "beta2"
+        depends_on: ClassVar[tuple[str, ...]] = ("beta",)
+
+    p = _mk(tmp_path, defaults, (Alpha, Beta, Beta2))
+    with pytest.raises(UnresolvedGatesError) as exc:
+        p.suggestions("beta2")  # beta.mode is unresolved
+    assert exc.value.fields == ["beta.mode"]
+
+
+def test_suggestions_for_suggest_stage_without_inputs_are_empty(
+    tmp_path: Path, defaults: Path
+) -> None:
+    from typing import ClassVar
+
+    from core.recipe import Gate, gate_field
+
+    class GKParams(KeysParams):
+        ok: Gate[str] = gate_field("y")
+
+    class GatedKeys(Keys):
+        name: ClassVar[str] = "gkeys"
+        Params: ClassVar[type[Any]] = GKParams
+
+    class DownZeta(Zeta):
+        name: ClassVar[str] = "dzeta"
+        depends_on: ClassVar[tuple[str, ...]] = ("gkeys",)
+
+    p = _mk(tmp_path, defaults, (GatedKeys, DownZeta))
+    assert p.suggestions("dzeta").values == {}
+
+
+def test_accept_defaults_stores_resolved_suggested_value_not_a_sentinel(
+    tmp_path: Path, defaults: Path
+) -> None:
+    p = _mk(tmp_path, defaults, (Keys, Zeta))
+    assert p.accept_defaults() == ["zeta.entries[a].decision", "zeta.entries[b].decision"]
+    entries = _zeta(p).entries
+    assert entries["a"].decision == AcceptDefault(accept_default=True, value="s_a:1")
+    p.commit("keys")
+    p.commit("zeta")
+    rows = [r for r in _by_stage(p.log_rows(), "zeta") if r.action == "gate"]
+    assert {r.type for r in rows} == {"default-accepted"}
+
+
+def test_suggested_gate_without_suggestion_is_not_accepted_and_stays_pending(
+    tmp_path: Path, defaults: Path
+) -> None:
+    p = _mk(tmp_path, defaults, (Keys, Zeta))
+    p.set_params("keys", KeysParams(keys=["a", "n1"]))  # "n..." keys get no suggestion
+    assert p.accept_defaults() == ["zeta.entries[a].decision"]
+    assert _zeta(p).entries["n1"].decision is None
+    assert p.unresolved_gates() == ["zeta.entries[n1].decision"]
+
+
+def test_changed_upstream_data_changes_suggestion_and_gives_drift_notice(
+    tmp_path: Path, defaults: Path
+) -> None:
+    p = _mk(tmp_path, defaults, (Keys, Zeta))
+    p.accept_defaults()
+    p.commit("keys")
+    p.commit("zeta")
+    p.set_params("keys", KeysParams(n=2))
+    p.sync_params()
+    drift = [n for n in p.notices if n.action == "gate_default_changed"]
+    assert sorted(n.target for n in drift) == [
+        "zeta.entries[a].decision",
+        "zeta.entries[b].decision",
+    ]
+    assert drift[0].params["current"].endswith(":2")
+    p.sync_params()  # not duplicated
+    assert len([n for n in p.notices if n.action == "gate_default_changed"]) == 2
+    p.commit("keys")
+    p.commit("zeta")
+    logged = [r for r in _by_stage(p.log_rows(), "zeta") if r.action == "gate_default_changed"]
+    assert len(logged) == 2
+
+
+def test_blocking_item_is_returned_by_run_stage_and_refused_by_commit(
+    tmp_path: Path, defaults: Path
+) -> None:
+    p = _mk(tmp_path, defaults, (Eta,))
+    result = p.run_stage("eta")
+    assert [i.warning for i in result.report if i.blocking] == ["stub blocking problem"]
+    before = _snapshot(p.root)
+    with pytest.raises(BlockingItemsError) as exc:
+        p.commit("eta")
+    assert "stub blocking problem" in str(exc.value)
+    after = _snapshot(p.root)
+    assert {k for k in after if k.startswith(("checkpoints", "log"))} == set()
+    assert not (p.root / "cache" / "heads.json").exists()
+    assert {k: v for k, v in after.items() if not k.startswith("cache/eta")} == {
+        k: v for k, v in before.items() if not k.startswith("cache/eta")
+    }
+    assert p.heads == {}
+
+
+def test_blocking_flag_survives_the_cache(tmp_path: Path, defaults: Path) -> None:
+    p = _mk(tmp_path, defaults, (Eta,))
+    p.run_stage("eta")
+    again = _mk(tmp_path, defaults, (Eta,))
+    items = [i for i in again.run_stage("eta").report if i.action == "bad_rows"]
+    assert items and items[0].blocking
+
+
+def _config_usage(p: Project) -> dict[str, Any]:
+    cfg = p.current_recipe().config
+    return {
+        "analytes": [a["key"] for a in cfg["analytes"]],
+        "units": [u["unit"] for u in cfg["units"]],
+        "thresholds": sorted(cfg["thresholds"]),
+        "tokens": sorted(cfg["tokens"]),
+    }
+
+
+_ETA_USAGE = {
+    "analytes": ["mn"],
+    "units": ["mg/L"],
+    "thresholds": ["min_obs_per_cell"],
+    "tokens": ["no_result_tokens"],
+}
+
+
+def test_recipe_snapshot_holds_exactly_the_committed_lookups(
+    tmp_path: Path, defaults: Path
+) -> None:
+    p = _mk(tmp_path, defaults, (Eta,))
+    p.set_params("eta", EtaParams(block=False))
+    empty: dict[str, list[str]] = {"analytes": [], "units": [], "thresholds": [], "tokens": []}
+    assert _config_usage(p) == empty
+    p.preview("eta", EtaParams(block=False))
+    p.run_stage("eta")  # uncommitted runs do not change the recipe
+    assert _config_usage(p) == empty
+    h0 = recipe_hash(p.current_recipe())
+    p.commit("eta")
+    assert _config_usage(p) == _ETA_USAGE
+    assert recipe_hash(p.current_recipe()) != h0
+    manifest = json.loads(
+        next((p.root / "checkpoints").glob("*_eta_*")).joinpath("manifest.json").read_text("utf-8")
+    )
+    assert manifest["vocabulary_usage"]["analytes"] == ["mn"]
+    assert manifest["recipe_hash"] == recipe_hash(p.current_recipe())
+
+
+def test_snapshot_survives_fresh_project_and_deleted_cache(tmp_path: Path, defaults: Path) -> None:
+    p = _mk(tmp_path, defaults, (Eta,))
+    p.set_params("eta", EtaParams(block=False))
+    p.commit("eta")
+    p.write_recipe()
+    expected = recipe_hash(p.current_recipe())
+    shutil.rmtree(p.root / "cache" / "eta")
+    fresh = _mk(tmp_path, defaults, (Eta,))
+    assert _config_usage(fresh) == _ETA_USAGE
+    assert recipe_hash(fresh.current_recipe()) == expected
+
+
+def test_cache_hit_still_reports_usage_for_the_commit(tmp_path: Path, defaults: Path) -> None:
+    p = _mk(tmp_path, defaults, (Eta,))
+    p.set_params("eta", EtaParams(block=False))
+    p.run_stage("eta")  # fills the cache
+    p.write_recipe()
+    fresh = _mk(tmp_path, defaults, (Eta,))
+    stub_stages.CALLS.clear()
+    fresh.commit("eta")
+    assert stub_stages.CALLS == []  # served from the cache
+    assert _config_usage(fresh) == _ETA_USAGE
+
+
+def test_cache_entry_without_usage_is_a_miss_with_warning(tmp_path: Path, defaults: Path) -> None:
+    p = _mk(tmp_path, defaults, (Eta,))
+    p.set_params("eta", EtaParams(block=False))
+    p.run_stage("eta")
+    p.write_recipe()
+    meta = next((p.root / "cache" / "eta").glob("*/meta.json"))
+    data = json.loads(meta.read_text("utf-8"))
+    del data["usage"]
+    meta.write_text(json.dumps(data), encoding="utf-8")
+    fresh = _mk(tmp_path, defaults, (Eta,))
+    stub_stages.CALLS.clear()
+    report = fresh.run_stage("eta").report
+    assert stub_stages.CALLS == ["eta"]
+    assert [i.action for i in report].count("cache_miss_unreadable") == 1

@@ -13,7 +13,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from core.config import DEFAULT_CONFIG_DIR, PLACEHOLDER_WARNING
-from core.project import ERROR_LOG_FILE, PLAIN_ERRORS, Project, ProjectError
+from core.project import ERROR_LOG_FILE, PLAIN_ERRORS, BlockingItemsError, Project, ProjectError
 from core.recipe import RecipeError
 from core.stages import STAGES
 
@@ -28,7 +28,9 @@ exit codes:
   0  success: every stage ran (or was unchanged) and was committed
   1  error: a locked file, an unreadable or unsupported recipe, bad configuration, or a
      missing project folder (the message says what to fix); also an internal error in a
-     stage, whose traceback is appended to <project>/log/errors.log
+     stage, whose traceback is appended to <project>/log/errors.log; also a stage that
+     reported blocking problems (each is printed as "Blocked: <stage>: <problem>"; nothing
+     is committed for that stage)
   2  unresolved gates: the run stopped and listed every gate field that still needs a
      decision (set it in the recipe, or use --accept-defaults in tests)
 """
@@ -66,6 +68,17 @@ def _describe_problems(problems: Sequence[str], recipe_file: Path) -> str:
     lines = [f"The recipe file '{recipe_file}' has settings that cannot be used:"]
     lines.extend(f"  - {p}" for p in problems)
     return "\n".join(lines)
+
+
+def _suggested_values(project: Project, unresolved: Sequence[str]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for name in sorted({g.split(".", 1)[0] for g in unresolved}):
+        try:
+            result = project.suggestions(name)
+        except ProjectError:
+            continue
+        out.update({f"{name}.{path}": value for path, value in result.values.items()})
+    return out
 
 
 def main(argv: Sequence[str] | None = None, stages: Sequence[type[Any]] = STAGES) -> int:
@@ -115,6 +128,10 @@ def _run(args: argparse.Namespace, stages: Sequence[type[Any]]) -> int:
             continue
         try:
             checkpoint = project.commit(name)
+        except BlockingItemsError as exc:
+            for item in exc.items:
+                print(f"Blocked: {name}: {item.warning}", file=sys.stderr)
+            return EXIT_ERROR
         except PLAIN_ERRORS:
             raise
         except Exception as exc:  # unexpected: keep the traceback in the log, not on screen
@@ -131,9 +148,11 @@ def _run(args: argparse.Namespace, stages: Sequence[type[Any]]) -> int:
 
     unresolved = project.unresolved_gates()
     if unresolved:
+        suggested = _suggested_values(project, unresolved)
         print("The run stopped: these gate fields still need a decision:")
         for field in unresolved:
-            print(f"  {field}")
+            hint = f" (suggested: {suggested[field]!r})" if field in suggested else ""
+            print(f"  {field}{hint}")
         return EXIT_UNRESOLVED_GATES
 
     project.write_recipe()

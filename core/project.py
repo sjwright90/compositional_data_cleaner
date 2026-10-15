@@ -48,12 +48,15 @@ from core.recipe import (
     SourceFile,
     assemble_recipe,
     build_recipe,
-    gate_fields,
+    gate_default_drift,
+    gate_paths,
+    get_path,
     load_recipe,
     recipe_hash,
     recipe_to_json,
     unresolved_gates,
 )
+from core.recipe import accept_defaults as _accept_defaults
 from core.stages import STAGES
 from core.vocab import UsageTracker, Vocabulary
 
@@ -83,6 +86,27 @@ class UnresolvedGatesError(ProjectError):
             "These decisions still need an answer before the run can continue: "
             + ", ".join(self.fields)
         )
+
+
+class BlockingItemsError(ProjectError):
+    """A stage reported blocking problems, so its result cannot be committed."""
+
+    def __init__(self, stage: str, items: Sequence[ReportItem]) -> None:
+        self.stage = stage
+        self.items = tuple(items)
+        lines = [f"  - {i.warning}" for i in self.items]
+        super().__init__(
+            f"Cannot commit '{stage}': it found problems that must be fixed first:\n"
+            + "\n".join(lines)
+        )
+
+
+@dataclass(frozen=True)
+class SuggestResult:
+    """Suggested gate values (stage-relative paths) and one `gate_suggestion` item per value."""
+
+    values: Mapping[str, Any]
+    report: tuple[ReportItem, ...]
 
 
 class DependencyNotCommittedError(ProjectError):
@@ -265,6 +289,10 @@ class Project:
         self.vocab = Vocabulary(self.config)
         self.recipe_path = Path(recipe_path) if recipe_path else self.root / RECIPE_FILE
         self._memo: dict[str, StageResult[Any]] = {}
+        self._usage: dict[tuple[str, str], UsageTracker] = {}  # (stage, fp) -> run/cache usage
+        self._head_usage: dict[tuple[str, str], UsageTracker] = {}  # from checkpoint manifests
+        self._orphans: dict[str, tuple[str, ...]] = {}
+        self._in_sync = False
         self._heads: dict[str, str] = self._read_heads()
 
         stage_params = {name: s.Params for name, s in self._stages.items()}
@@ -314,14 +342,167 @@ class Project:
         return tuple(self._order)
 
     def unresolved_gates(self) -> list[str]:
-        return sorted(g for n in self._order for g in unresolved_gates(n, self._params[n]))
+        self.sync_params()
+        return sorted(
+            g
+            for n in self._order
+            for g in unresolved_gates(n, self._params[n], exclude=self._orphans.get(n, ()))
+        )
 
     def current_recipe(self) -> Recipe:
+        return self._recipe({})
+
+    def _recipe(self, extra: Mapping[str, UsageTracker]) -> Recipe:
+        """Recipe whose config snapshot covers the committed heads (read from their checkpoint
+        manifests) plus `extra`, the usage of a commit in progress."""
+        usage = {
+            n: self._manifest_usage(n, fp)
+            for n, fp in sorted(self._heads.items())
+            if n not in extra
+        }
+        usage.update(extra)
         return assemble_recipe(
             sources=self._sources,
-            config_snapshot=self.vocab.snapshot(UsageTracker()),
+            config_snapshot=self.vocab.snapshot(UsageTracker.union(usage.values())),
             settings=self._settings,
             params=self._params,
+        )
+
+    def _manifest_usage(self, name: str, fp: str) -> UsageTracker:
+        key = (name, fp)
+        if key not in self._head_usage:
+            self._head_usage[key] = self._read_manifest_usage(name, fp)
+        return self._head_usage[key]
+
+    def _read_manifest_usage(self, name: str, fp: str) -> UsageTracker:
+        found = (self.root / "checkpoints").glob(f"*_{name}_{fp[:8]}")
+        for directory in sorted(found, reverse=True):
+            try:
+                data = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if data.get("stage_fingerprint") == fp and "vocabulary_usage" in data:
+                return UsageTracker.from_json(data["vocabulary_usage"])
+        logger.warning("no vocabulary usage recorded for committed stage %s (%s)", name, fp[:8])
+        return UsageTracker()
+
+    # ---- data-dependent params: sync_params and suggest ----
+
+    def _ancestors(self, name: str) -> set[str]:
+        out: set[str] = set()
+        for d in self._stage(name).depends_on:
+            out |= {d} | self._ancestors(d)
+        return out
+
+    def _runnable(self, name: str) -> bool:
+        """Every gate of the stage and of its ancestors is resolved (orphans excluded)."""
+        return all(
+            not unresolved_gates(n, self._params[n], exclude=self._orphans.get(n, ()))
+            for n in sorted({name} | self._ancestors(name))
+        )
+
+    def _try_inputs(self, name: str) -> tuple[bool, Any]:
+        stage = self._stage(name)
+        if not all(self._runnable(d) for d in stage.depends_on):
+            return False, None
+        return True, self._inputs(stage, {d: self.run_stage(d) for d in stage.depends_on})
+
+    def _synced(self, name: str, params: BaseModel) -> tuple[BaseModel, tuple[str, ...]]:
+        """`params` after the stage's `sync_params` (when it has one and upstream is runnable)."""
+        sync = getattr(self._stage(name), "sync_params", None)
+        if sync is None:
+            return params, ()
+        available, inputs = self._try_inputs(name)
+        if not available:
+            return params, self._orphans.get(name, ())
+        result = sync(inputs, params, self.vocab)
+        return result.params, tuple(result.orphans)
+
+    def _sync_stage(self, name: str) -> None:
+        was, self._in_sync = self._in_sync, True
+        try:
+            new, orphans = self._synced(name, self._params[name])
+            if new != self._params[name]:
+                self._params[name] = new
+            self._orphans[name] = orphans
+            self._refresh_suggested_drift(name)
+        finally:
+            self._in_sync = was
+
+    def _sync_upto(self, name: str, *, include_self: bool = True) -> None:
+        if self._in_sync:
+            return
+        wanted = self._ancestors(name) | ({name} if include_self else set())
+        for n in self._order:
+            if n in wanted:
+                self._sync_stage(n)
+
+    def sync_params(self) -> None:
+        """Apply every stage's `sync_params` in topological order (new entries get unresolved
+        gates; nothing is written to disk)."""
+        if self._in_sync:
+            return
+        for n in self._order:
+            self._sync_stage(n)
+
+    def suggestions(self, name: str) -> SuggestResult:
+        """Suggested gate values for the stage. Syncs, calls `suggest`, never writes.
+
+        Works while gates are unresolved. A stage with `suggest` whose upstream is not runnable
+        yet returns no values; a stage without `suggest` whose upstream is not runnable raises
+        `UnresolvedGatesError` naming the upstream gates.
+        """
+        self._sync_upto(name)
+        return self._suggest(name, self._params[name], self._orphans.get(name, ()))
+
+    def _suggest(self, name: str, params: BaseModel, orphans: Sequence[str]) -> SuggestResult:
+        suggest = getattr(self._stage(name), "suggest", None)
+        available, inputs = self._try_inputs(name)
+        if not available:
+            if suggest is None:
+                pending = sorted(
+                    g
+                    for n in self._ancestors(name)
+                    for g in unresolved_gates(n, self._params[n], exclude=self._orphans.get(n, ()))
+                )
+                raise UnresolvedGatesError(pending)
+            return SuggestResult({}, ())
+        if suggest is None:
+            return SuggestResult({}, ())
+        values = dict(suggest(inputs, params, self.vocab))
+        known = gate_paths(params)
+        unknown = sorted(set(values) - set(known))
+        if unknown:
+            raise ValueError(f"Stage '{name}' suggested values for unknown gate(s): {unknown}")
+        unresolved = unresolved_gates(name, params, exclude=orphans)
+        pending_paths = {g.split(".", 1)[1] for g in unresolved}
+        items = tuple(
+            ReportItem("gate_suggestion", f"{name}.{path}", 1, {"value": values[path]})
+            for path in sorted(values)
+            if path in pending_paths
+        )
+        return SuggestResult(values, items)
+
+    def _refresh_suggested_drift(self, name: str) -> None:
+        """Replace the drift notices of accepted suggested gates with the current comparison."""
+        params = self._params[name]
+        orphans = self._orphans.get(name, ())
+        suggested = {p for p, s in gate_paths(params).items() if s.suggested}
+        if not suggested or getattr(self._stage(name), "suggest", None) is None:
+            return
+        targets = {f"{name}.{p}" for p in suggested}
+        self._notices = [
+            n
+            for n in self._notices
+            if not (n.action == "gate_default_changed" and n.target in targets)
+        ]
+        if not any(isinstance(get_path(params, p), AcceptDefault) for p in suggested):
+            return
+        result = self._suggest(name, params, orphans)
+        self._notices.extend(
+            i
+            for i in gate_default_drift(name, params, result.values, exclude=orphans)
+            if i.target in targets
         )
 
     # ---- mutation of in-memory state (recipe) ----
@@ -430,13 +611,21 @@ class Project:
         return data
 
     def accept_defaults(self) -> list[str]:
-        """Set every unresolved gate to an explicit accepted default; return the gate paths."""
-        from core.recipe import accept_defaults as _accept
-
-        pending = self.unresolved_gates()
+        """Set every resolvable unresolved gate to an explicit accepted default; return the gate
+        paths accepted. A suggested gate with no suggestion stays unresolved."""
+        accepted: list[str] = []
         for name in self._order:
-            self._params[name] = _accept(self._params[name])
-        return pending
+            self._sync_upto(name)
+            params = self._params[name]
+            orphans = self._orphans.get(name, ())
+            pending = unresolved_gates(name, params, exclude=orphans)
+            has_suggest = getattr(self._stage(name), "suggest", None) is not None
+            values = self._suggest(name, params, orphans).values if has_suggest else {}
+            new = _accept_defaults(params, values, exclude=orphans)
+            still = set(unresolved_gates(name, new, exclude=orphans))
+            accepted.extend(g for g in pending if g not in still)
+            self._params[name] = new
+        return sorted(accepted)
 
     def write_recipe(self, path: Path | None = None) -> Path:
         target = Path(path) if path else self.recipe_path
@@ -478,37 +667,72 @@ class Project:
 
     def run_stage(self, name: str) -> StageResult[Any]:
         """Run (or load from the fingerprint-keyed cache). Never touches heads or the log."""
-        return self._run(name, self._params[self._stage(name).name], use_cache=True)
+        self._sync_upto(name)
+        return self._run(
+            name,
+            self._params[name],
+            use_cache=True,
+            orphans=self._orphans.get(name, ()),
+        )
 
     def preview(self, name: str, params: BaseModel) -> StageResult[Any]:
-        """Run with the given params; no cache write, no log, no commit."""
-        self._stage(name)
-        return self._run(name, params, use_cache=False)
+        """Run with the given params; no cache write, no log, no commit.
 
-    def _run(self, name: str, params: BaseModel, *, use_cache: bool) -> StageResult[Any]:
+        `sync_params` is applied to the given params (not stored); unresolved gates raise
+        `UnresolvedGatesError`. Use `suggestions` to read suggested values meanwhile.
+        """
+        self._stage(name)
+        self._sync_upto(name, include_self=False)
+        synced, orphans = self._synced(name, params)
+        return self._run(name, synced, use_cache=False, orphans=orphans)
+
+    def _run(
+        self,
+        name: str,
+        params: BaseModel,
+        *,
+        use_cache: bool,
+        orphans: Sequence[str] = (),
+    ) -> StageResult[Any]:
         stage = self._stage(name)
         if not stage.depends_on:
             self._verify_sources()
-        missing = unresolved_gates(name, params)
+        missing = unresolved_gates(name, params, exclude=orphans)
         if missing:
             raise UnresolvedGatesError(missing)
         dep_results = {d: self.run_stage(d) for d in stage.depends_on}
         dep_fps = {d: self.fingerprint(d) for d in stage.depends_on}
         fp = self._fingerprint_of(name, params, dep_fps)
         extra: tuple[ReportItem, ...] = ()
+        cached: StageResult[Any] | None = None
+        tracker: UsageTracker | None = None
         if use_cache:
             if fp in self._memo:
                 return self._memo[fp]
-            cached, extra = self._read_cache(name, fp)
-            if cached is not None:
-                self._memo[fp] = cached
-                return cached
-        inputs = self._inputs(stage, dep_results)
-        result: StageResult[Any] = stage.run(inputs, params, self.vocab)
-        if use_cache:
-            self._write_cache(name, fp, result)
-        if extra:
-            result = StageResult(result.output, (*result.report, *extra))
+            cached, tracker, extra = self._read_cache(name, fp)
+        result: StageResult[Any]
+        if cached is not None:
+            result = cached
+        else:
+            tracker = UsageTracker()
+            inputs = self._inputs(stage, dep_results)
+            result = stage.run(inputs, params, self.vocab.tracking(tracker))
+            if use_cache:
+                self._write_cache(name, fp, result, tracker)
+        if use_cache and tracker is not None:
+            self._usage[(name, fp)] = tracker
+        tail = list(extra)
+        if orphans:
+            tail.append(
+                ReportItem(
+                    "orphan_decisions",
+                    name,
+                    len(orphans),
+                    {"keys": list(orphans)},
+                )
+            )
+        if tail:
+            result = StageResult(result.output, (*result.report, *tail))
         if use_cache:
             self._memo[fp] = result
         return result
@@ -535,7 +759,9 @@ class Project:
     def _cache_dir(self, name: str, fp: str) -> Path:
         return self.root / "cache" / name / fp
 
-    def _write_cache(self, name: str, fp: str, result: StageResult[Any]) -> None:
+    def _write_cache(
+        self, name: str, fp: str, result: StageResult[Any], tracker: UsageTracker
+    ) -> None:
         final = self._cache_dir(name, fp)
         if final.exists():
             shutil.rmtree(final, ignore_errors=True)
@@ -552,13 +778,18 @@ class Project:
                     "count": item.count,
                     "params": _jsonable(dict(item.params)),
                     "warning": item.warning,
+                    "blocking": item.blocking,
                     "evidence": None,
                 }
                 if item.evidence is not None:
                     entry["evidence"] = f"evidence/{i}.parquet"
                     item.evidence.to_parquet(tmp / entry["evidence"])
                 report.append(entry)
-            meta = {"output": _encode(result.output, tmp, "output"), "report": report}
+            meta = {
+                "output": _encode(result.output, tmp, "output"),
+                "report": report,
+                "usage": tracker.to_json(),
+            }
             (tmp / _META).write_text(json.dumps(meta, sort_keys=True), encoding="utf-8")
             os.replace(tmp, final)
         except BaseException:
@@ -567,13 +798,14 @@ class Project:
 
     def _read_cache(
         self, name: str, fp: str
-    ) -> tuple[StageResult[Any] | None, tuple[ReportItem, ...]]:
+    ) -> tuple[StageResult[Any] | None, UsageTracker | None, tuple[ReportItem, ...]]:
         entry = self._cache_dir(name, fp)
         if not entry.is_dir():
-            return None, ()
+            return None, None, ()
         try:
             meta = json.loads((entry / _META).read_text(encoding="utf-8"))
             output = _decode(meta["output"], entry)
+            tracker = UsageTracker.from_json(meta["usage"])  # KeyError: entry predates usage
             items = tuple(
                 ReportItem(
                     r["action"],
@@ -582,6 +814,7 @@ class Project:
                     r["params"],
                     evidence=pd.read_parquet(entry / r["evidence"]) if r["evidence"] else None,
                     warning=r["warning"],
+                    blocking=bool(r.get("blocking", False)),
                 )
                 for r in meta["report"]
             )
@@ -599,16 +832,18 @@ class Project:
                     "so it was recomputed."
                 ),
             )
-            return None, (warn,)
-        return StageResult(output, items), ()
+            return None, None, (warn,)
+        return StageResult(output, items), tracker, ()
 
     # ---- commit ----
 
     def commit(self, name: str) -> Path:
         """Log one row per report item and per gate field, write an immutable checkpoint."""
         stage = self._stage(name)
+        self._sync_upto(name)
         params = self._params[name]
-        missing = unresolved_gates(name, params)
+        orphans = self._orphans.get(name, ())
+        missing = unresolved_gates(name, params, exclude=orphans)
         if missing:
             raise UnresolvedGatesError(missing)
         if stage.depends_on:
@@ -617,7 +852,11 @@ class Project:
                 if status[dep] is not Status.DONE:
                     raise DependencyNotCommittedError(name, dep, status[dep].value)
         result = self.run_stage(name)
+        blocking = [i for i in result.report if i.blocking]
+        if blocking:
+            raise BlockingItemsError(name, blocking)
         fp = self.fingerprint(name)
+        tracker = self._usage[(name, fp)]
 
         checkpoints = self.root / "checkpoints"
         checkpoints.mkdir(parents=True, exist_ok=True)
@@ -652,8 +891,9 @@ class Project:
             "stage": name,
             "stage_fingerprint": fp,
             "stage_version": stage.version,
-            "recipe_hash": recipe_hash(self.current_recipe()),
+            "recipe_hash": recipe_hash(self._recipe({name: tracker})),
             "config_hash": _config_hash(stage, self._layers),
+            "vocabulary_usage": tracker.to_json(),
             "app_version": _app_version(),
             "python": platform.python_version(),
             "pandas": metadata.version("pandas"),
@@ -664,10 +904,10 @@ class Project:
         _write_json_atomic(ck / "manifest.json", manifest)
 
         rows: list[LogRow] = self._notice_rows(name)
-        for path, _spec in sorted(gate_fields(type(params)).items()):
-            value: Any = params
-            for part in path.split("."):
-                value = getattr(value, part)
+        for path in sorted(gate_paths(params)):
+            if any(path == o or path.startswith((f"{o}.", f"{o}[")) for o in orphans):
+                continue
+            value: Any = get_path(params, path)
             accepted = isinstance(value, AcceptDefault)
             resolved = value.value if accepted else value
             rows.append(
@@ -687,6 +927,7 @@ class Project:
         )
         self._append(rows)
 
+        self._head_usage[(name, fp)] = tracker
         self._heads[name] = fp
         _write_json_atomic(self.root / HEADS_FILE, self._heads)
         logger.info("committed %s -> %s", name, ck.name)

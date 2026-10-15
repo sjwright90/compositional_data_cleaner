@@ -315,3 +315,113 @@ def test_load_recipe_runs_migration_and_returns_item(tmp_path: Path) -> None:
 
     loaded = load_recipe(json.dumps(old), {"demo": DemoParams}, registry={0: step})
     assert [i.action for i in loaded.report] == ["migration"]
+
+
+# ---- gates inside lists and dicts (T11a) ----
+
+
+class Sheet(BaseModel):
+    layout: Gate[str] = gate_field("wide")
+
+
+class Mapped(BaseModel):
+    unit: Gate[str] = gate_field("mg/L")
+    pick: Gate[str] = gate_field("static", suggested=True)
+
+
+class CollParams(BaseModel):
+    sheets: list[Sheet] = []
+    maps: dict[str, Mapped] = {}
+
+
+def _coll() -> CollParams:
+    return CollParams(
+        sheets=[Sheet(), Sheet(layout="long"), Sheet()],
+        maps={"mn": Mapped(), "we]ird.key": Mapped(unit="ug/L")},
+    )
+
+
+def test_gate_paths_walks_lists_and_dicts_with_indexed_paths() -> None:
+    from core.recipe import gate_paths
+
+    paths = gate_paths(_coll())
+    assert sorted(paths) == [
+        "maps[mn].pick",
+        "maps[mn].unit",
+        "maps[we\\]ird.key].pick",
+        "maps[we\\]ird.key].unit",
+        "sheets[0].layout",
+        "sheets[1].layout",
+        "sheets[2].layout",
+    ]
+    assert paths["maps[mn].pick"].suggested and not paths["maps[mn].unit"].suggested
+
+
+def test_class_level_gate_fields_ignore_collections() -> None:
+    assert gate_fields(CollParams) == {}
+
+
+def test_unresolved_gates_lists_indexed_paths_sorted() -> None:
+    assert unresolved_gates("st", _coll()) == [
+        "st.maps[mn].pick",
+        "st.maps[mn].unit",
+        "st.maps[we\\]ird.key].pick",
+        "st.sheets[0].layout",
+        "st.sheets[2].layout",
+    ]
+
+
+def test_get_and_set_path_round_trip_without_mutation() -> None:
+    from core.recipe import get_path, set_path
+
+    p = _coll()
+    q = set_path(p, "maps[we\\]ird.key].unit", "mg/L")
+    assert get_path(q, "maps[we\\]ird.key].unit") == "mg/L"
+    assert get_path(p, "maps[we\\]ird.key].unit") == "ug/L"
+    r = set_path(p, "sheets[0].layout", "long")
+    assert get_path(r, "sheets[0].layout") == "long" and get_path(p, "sheets[0].layout") is None
+
+
+def test_accept_defaults_fills_collections_and_leaves_unsuggested_suggested_gates() -> None:
+    accepted = accept_defaults(_coll(), {"maps[mn].pick": "from_data"})
+    assert accepted.sheets[0].layout == AcceptDefault(accept_default=True, value="wide")
+    assert accepted.sheets[1].layout == "long"
+    assert accepted.maps["mn"].unit == AcceptDefault(accept_default=True, value="mg/L")
+    assert accepted.maps["mn"].pick == AcceptDefault(accept_default=True, value="from_data")
+    # a suggested gate with no suggestion is not accepted and stays pending
+    assert accepted.maps["we]ird.key"].pick is None
+    assert unresolved_gates("st", accepted) == ["st.maps[we\\]ird.key].pick"]
+
+
+def test_accept_defaults_skips_excluded_orphans() -> None:
+    accepted = accept_defaults(_coll(), {}, exclude=("maps[mn]",))
+    assert accepted.maps["mn"].unit is None
+    assert unresolved_gates("st", accepted, exclude=("maps[mn]",)) == ["st.maps[we\\]ird.key].pick"]
+
+
+def test_drift_names_indexed_path_and_compares_suggested_gates_to_suggestion() -> None:
+    stored = CollParams(
+        sheets=[Sheet(layout=AcceptDefault(accept_default=True, value="old"))],
+        maps={
+            "mn": Mapped(
+                unit="x",
+                pick=AcceptDefault(accept_default=True, value="s1"),
+            )
+        },
+    )
+    flat = gate_default_drift("st", stored)
+    assert [i.target for i in flat] == ["st.sheets[0].layout"]  # suggested gates skipped
+    with_s = gate_default_drift("st", stored, {"maps[mn].pick": "s2"})
+    assert [i.target for i in with_s] == ["st.maps[mn].pick", "st.sheets[0].layout"]
+    assert gate_default_drift("st", stored, {"maps[mn].pick": "s1"})[0].target == (
+        "st.sheets[0].layout"
+    )
+    assert gate_default_drift("st", stored, {}, exclude=("maps[mn]",))[0].target == (
+        "st.sheets[0].layout"
+    )
+
+
+def test_collection_params_round_trip_through_recipe() -> None:
+    p = accept_defaults(_coll(), {"maps[mn].pick": "v", "maps[we\\]ird.key].pick": "w"})
+    again = CollParams.model_validate(p.model_dump(mode="json"))
+    assert again == p
