@@ -1,6 +1,6 @@
 # PROGRESS
 
-**State:** T00-T06c merged to `main`; A16 and A17 added and T10-T16 task files fleshed out (T11 split into T11a/b/c; generic `suggest`/`sync_params` hooks in T11a). T10 done on `feature/t10-import-inventory` (not yet merged). **Next:** T11a.
+**State:** T00-T06c and T10 merged to `main`; A16 and A17 added and T10-T16 task files fleshed out (T11 split into T11a/b/c; generic `suggest`/`sync_params` hooks in T11a). **Next:** T11a.
 
 ## Done
 - Spec split into `docs/spec/`, CLAUDE.md, path-scoped rules, task breakdown.
@@ -13,7 +13,7 @@
 - T06a: `core/recipe.py` (`Gate`, `AcceptDefault{accept_default, value}`, `gate_field`, `Recipe`, `build_recipe`, `load_recipe`, `recipe_hash`), `core/migrations.py` (empty registry, `CURRENT = 1`, injectable), `tests/test_recipe.py`, `tests/fixtures/migrations/recipe_v0.json`. Split recorded in decisions.md.
 - T06b: `core/audit.py` (LogRow, JSONL line form), `core/project.py` (`Project`: run_stage/preview/staleness/commit, Parquet cache, heads, checkpoints+manifest, log), `core/run.py` (`python -m core.run`, exit 0/1/2), `tests/stub_stages.py`, `tests/test_{audit,project,run}.py`. Decisions in decisions.md 2026-10-15.
 - T06c: checkpoint-1 fixes: notices logged at commit, runner error paths (`errors.log`), arch tests over stub stages, `assemble_recipe`, commit requires DONE dependencies, test-strength fixes, docs. See `tasks/T06c.md`.
-- T10: `core/errors.py` (`ProjectError`), `core/ingest.py` (`read_inventory`, `read_sheet`, `SheetInfo`, `UnsupportedSourceError`, `SourceReadError`), `Project.import_sources` (copy to `sources/`, atomic recipe write, immediate audit row), source verification in `_run` for root stages, golden root-fingerprint payload test, `tests/test_ingest.py`. Decisions in decisions.md 2026-10-15.
+- T10: `core/errors.py` (`ProjectError`), `core/ingest.py` (`read_inventory`, `read_sheet`, `SheetInfo`, `UnsupportedSourceError`, `SourceReadError`), `Project.import_sources` (copy to `sources/`, atomic recipe write, immediate audit row; only `sources` is patched on disk, in-memory params are never persisted), source verification in `_run` for root stages, golden root-fingerprint payload test, `tests/test_ingest.py`. Decisions in decisions.md 2026-10-15.
 
 ## Open issues
 - Follow-up (T16/T40): replace `Mapping[str, str]` name map and `Any` ImputeParams in `core/artifacts.py` with the real types.

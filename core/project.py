@@ -356,17 +356,19 @@ class Project:
             listed = ", ".join(f"'{p}'" for p in absent)
             raise FileNotFoundError(f"These files could not be found: {listed}.")
         digests = [file_sha256(p) for p in originals]  # a locked file stops here, before any copy
+        disk = self._disk_recipe()  # a damaged recipe stops here, before any copy
 
         sources_dir = self.root / SOURCES_DIR
         sources_dir.mkdir(parents=True, exist_ok=True)
-        listed_paths = {s.path for s in self._sources}
+        on_disk = {str(s["path"]) for s in disk.get("sources", [])}
+        in_memory = {s.path for s in self._sources}
         added: list[SourceFile] = []
         items: list[ReportItem] = []
         rows: list[LogRow] = []
         for original, digest in zip(originals, digests, strict=True):
             target, copied, renamed_from = _place_source(original, digest, sources_dir)
             rel = target.relative_to(self.root).as_posix()
-            known = rel in listed_paths or any(a.path == rel for a in added)
+            known = (rel in on_disk and rel in in_memory) or any(a.path == rel for a in added)
             params = {"original_path": str(original.resolve()), "sha256": digest}
             if known:
                 items.append(ReportItem("source_unchanged", rel, 1, params))
@@ -393,17 +395,39 @@ class Project:
                 )
             )
         if added:
-            recipe = assemble_recipe(
-                sources=[*self._sources, *added],
-                config_snapshot=self.vocab.snapshot(UsageTracker()),
-                settings=self._settings,
-                params=self._params,
-            )
-            _write_text_atomic(self.recipe_path, recipe_to_json(recipe))
-            self._sources = tuple(recipe.sources)
+            # Only the sources change on disk; in-memory params and gate decisions are not saved.
+            merged = {str(r["path"]): r for r in disk.get("sources", [])}
+            merged.update({a.path: a.model_dump(mode="json") for a in added})
+            disk["sources"] = [merged[k] for k in sorted(merged)]
+            _write_text_atomic(self.recipe_path, json.dumps(disk, indent=2, sort_keys=True) + "\n")
+            kept = {src.path: src for src in self._sources}
+            kept.update({a.path: a for a in added})
+            self._sources = tuple(kept[k] for k in sorted(kept))
             self._append(rows)
         logger.info("imported %d source(s), %d unchanged", len(added), len(items) - len(added))
         return tuple(items)
+
+    def _disk_recipe(self) -> dict[str, Any]:
+        """The recipe as stored on disk, or a new default one when the file is absent."""
+        if not self.recipe_path.is_file():
+            seed = build_recipe(
+                project_root=self.root,
+                source_paths=[],
+                config_snapshot={},
+                settings=self._settings,
+                stages={name: s.Params() for name, s in self._stages.items()},
+            )
+            return dict(seed.model_dump(mode="json"))
+        try:
+            data = json.loads(self.recipe_path.read_text(encoding="utf-8"))
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            raise ProjectError(
+                f"The recipe file '{self.recipe_path.name}' could not be read, so no files were "
+                "imported. The file may be damaged."
+            )
+        return data
 
     def accept_defaults(self) -> list[str]:
         """Set every unresolved gate to an explicit accepted default; return the gate paths."""

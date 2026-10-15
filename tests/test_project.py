@@ -679,3 +679,44 @@ def test_root_fingerprint_payload_shape_is_pinned(
     assert seen["payload"] == (
         f'{{"params":{{"factor":1}},"sources":[["sources/a.csv","{ha}"],["sources/b.csv","{hb}"]]}}'
     )
+
+
+def test_import_persists_only_sources_not_in_memory_edits(project: Project, tmp_path: Path) -> None:
+    project.write_recipe()
+    project.set_params("alpha", AlphaParams(factor=7))
+    project.set_params("beta", BetaParams(mode="keep", tag="edited"))
+    project.import_sources([_incoming(tmp_path, "a.csv", "x\n1\n")])
+    disk = json.loads((project.root / "recipe.json").read_text(encoding="utf-8"))
+    assert [s["path"] for s in disk["sources"]] == ["sources/a.csv"]
+    assert disk["stages"]["alpha"] == {"factor": 1}
+    assert disk["stages"]["beta"] == {"mode": None, "tag": "t"}
+    memory = project.current_recipe()
+    assert [s.path for s in memory.sources] == ["sources/a.csv"]
+    assert memory.stages["alpha"] == {"factor": 7}
+    assert memory.stages["beta"] == {"mode": "keep", "tag": "edited"}
+
+
+def test_import_without_recipe_file_starts_a_default_one(project: Project, tmp_path: Path) -> None:
+    project.set_params("alpha", AlphaParams(factor=7))
+    assert not (project.root / "recipe.json").exists()
+    project.import_sources([_incoming(tmp_path, "a.csv", "x\n1\n")])
+    disk = json.loads((project.root / "recipe.json").read_text(encoding="utf-8"))
+    assert disk["stages"]["alpha"] == {"factor": 1}
+    assert project.params["alpha"] == AlphaParams(factor=7)
+
+
+def test_readd_logs_one_row_and_true_noop_logs_none(project: Project, tmp_path: Path) -> None:
+    src = _incoming(tmp_path, "a.csv", "x\n1\n")
+    project.import_sources([src])
+    assert len(project.log_rows()) == 1
+    project.import_sources([src])  # true no-op: nothing changes
+    assert len(project.log_rows()) == 1
+    (project.root / "recipe.json").unlink()  # copy is in sources/ but not in the recipe
+    fresh = Project(project.root, stages=STUBS, defaults_dir=project._layers[0])
+    (item,) = fresh.import_sources([src])
+    assert item.action == "source_readded"
+    rows = fresh.log_rows()
+    assert len(rows) == 2
+    assert rows[-1].parameters["outcome"] == "source_readded"
+    fresh.import_sources([src])  # now a no-op again
+    assert len(fresh.log_rows()) == 2
