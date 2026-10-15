@@ -1,19 +1,25 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, ClassVar
 
 import pytest
+from pydantic import BaseModel
 
 from core.audit import row_from_json
+from core.config import ConfigError
+from core.pipeline import FileLockedError, StageResult
+from core.project import DependencyNotCommittedError
 from core.recipe import RecipeSettings, build_recipe, recipe_to_json
 from core.run import main
 from tests import stub_stages
 from tests.fixtures.generate import generate
-from tests.stub_stages import STUBS
+from tests.stub_stages import STUBS, Alpha
 
 FIXTURE_CONFIG = Path(__file__).resolve().parent / "fixtures" / "config"
 
@@ -97,19 +103,15 @@ def test_second_run_is_unchanged_and_not_recommitted(
     assert len(_checkpoints(proj, "beta")) == 1
 
 
-def test_recipe_option_writes_output_recipe_there(
-    proj: Path, defaults: Path, tmp_path: Path
-) -> None:
-    out = tmp_path / "out_recipe.json"
-    code = main(
-        ["--project", str(proj), "--recipe", str(proj / "recipe.json"), "--accept-defaults"],
-        stages=STUBS,
-    )
-    assert code == 0
-    alt = tmp_path / "alt.json"
+def test_recipe_option_reads_and_writes_the_given_file(proj: Path, defaults: Path) -> None:
+    original = (proj / "recipe.json").read_bytes()
+    alt = proj.parent / "alt_recipe.json"
     shutil.copy(proj / "recipe.json", alt)
-    assert main(["--project", str(proj), "--recipe", str(alt)], stages=STUBS) == 0
-    assert not out.exists()
+    code = main(["--project", str(proj), "--recipe", str(alt), "--accept-defaults"], stages=STUBS)
+    assert code == 0
+    written = json.loads(alt.read_text(encoding="utf-8"))
+    assert written["stages"]["beta"]["mode"] == {"accept_default": True, "value": "keep"}
+    assert (proj / "recipe.json").read_bytes() == original
 
 
 def test_placeholder_line_printed(
@@ -157,5 +159,91 @@ def test_help_documents_exit_codes() -> None:
         [sys.executable, "-m", "core.run", "--help"], capture_output=True, text=True, check=False
     )
     assert res.returncode == 0
-    for needle in ("0", "1", "2", "unresolved", "tests only (A3)"):
-        assert needle in res.stdout
+    for code, word in (("0", "success"), ("1", "error"), ("2", "unresolved gates")):
+        assert re.search(rf"^\s+{code}\s+{word}\b", res.stdout, re.MULTILINE), (code, word)
+    assert "tests only (A3)" in res.stdout
+
+
+def test_second_run_adds_no_log_rows(proj: Path, defaults: Path) -> None:
+    (defaults / "PLACEHOLDER").write_text("", encoding="utf-8")
+    assert main(["--project", str(proj), "--accept-defaults"], stages=STUBS) == 0
+    log = proj / "log" / "decisions.jsonl"
+    first = log.read_bytes()
+    assert any(r.action == "placeholder_config" for r in _log(proj))
+    assert main(["--project", str(proj)], stages=STUBS) == 0
+    assert log.read_bytes() == first
+
+
+def test_invalid_recipe_field_prints_plain_per_field_message(
+    proj: Path, defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data = json.loads((proj / "recipe.json").read_text(encoding="utf-8"))
+    data["stages"] = {"alpha": {"factor": "lots"}}
+    data["settings"] = {"min_obs_per_cell": "many"}
+    (proj / "recipe.json").write_text(json.dumps(data), encoding="utf-8")
+    code = main(["--project", str(proj)], stages=STUBS)
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "recipe.json" in err
+    assert "settings.min_obs_per_cell:" in err
+    assert "Traceback" not in err and "pydantic" not in err and "input_value" not in err
+
+    data["settings"] = {"min_obs_per_cell": 3}
+    (proj / "recipe.json").write_text(json.dumps(data), encoding="utf-8")
+    assert main(["--project", str(proj)], stages=STUBS) == 1
+    assert "stages.alpha.factor:" in capsys.readouterr().err
+
+
+class _EmptyParams(BaseModel):
+    pass
+
+
+def _raising_stage(label: str, exc: Exception) -> type[Any]:
+    class _Raising:
+        name: ClassVar[str] = label
+        version: ClassVar[str] = "1"
+        depends_on: ClassVar[tuple[str, ...]] = ()
+        config_files: ClassVar[tuple[str, ...]] = ()
+        Params: ClassVar[type[Any]] = _EmptyParams
+
+        def run(self, inputs: Any, params: Any, vocab: Any) -> StageResult[Any]:
+            raise exc
+
+    return _Raising
+
+
+def test_unexpected_stage_error_is_logged_not_printed(
+    proj: Path, defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stages = (Alpha, _raising_stage("boom", KeyError("missing_column")))
+    assert main(["--project", str(proj)], stages=stages) == 1
+    err = capsys.readouterr().err
+    logfile = proj / "log" / "errors.log"
+    assert "Internal error in stage boom: KeyError: 'missing_column'" in err
+    assert f"details in {logfile}" in err
+    assert "Traceback" not in err
+    text = logfile.read_text(encoding="utf-8")
+    assert "Traceback" in text and "missing_column" in text and "stage=boom" in text
+    assert main(["--project", str(proj)], stages=stages) == 1
+    assert logfile.read_text(encoding="utf-8").count("=== ") == 2
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        FileLockedError(
+            "Cannot read 'lab_a.xlsx'. If it is open in Excel, close it and try again."
+        ),
+        DependencyNotCommittedError("beta", "alpha", "stale"),
+        ConfigError("tokens.json: key 'decimal_separator' must be one of '.' or ','."),
+    ],
+    ids=["locked-file", "dependency", "config"],
+)
+def test_plain_language_errors_in_a_stage_are_not_internal_errors(
+    exc: Exception, proj: Path, defaults: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["--project", str(proj)], stages=(_raising_stage("plain", exc),)) == 1
+    err = capsys.readouterr().err
+    assert str(exc) in err
+    assert "Internal error" not in err
+    assert not (proj / "log" / "errors.log").exists()

@@ -9,10 +9,17 @@ import pytest
 
 from core.audit import LogRow
 from core.pipeline import Status
-from core.project import Project, UnresolvedGatesError
+from core.project import DependencyNotCommittedError, Project, UnresolvedGatesError
 from core.recipe import AcceptDefault
 from tests import stub_stages
-from tests.stub_stages import STUBS, AlphaParams, BetaOut, BetaParams
+from tests.stub_stages import (
+    STUBS,
+    STUBS_WITH_GAMMA,
+    Alpha,
+    AlphaParams,
+    BetaOut,
+    BetaParams,
+)
 
 FIXTURE_CONFIG = Path(__file__).resolve().parent / "fixtures" / "config"
 
@@ -38,6 +45,20 @@ def project(tmp_path: Path, defaults: Path) -> Project:
 
 def _accept_beta(p: Project) -> None:
     p.set_params("beta", BetaParams(mode="keep"))
+
+
+def _snapshot(root: Path) -> dict[str, bytes]:
+    return {
+        p.relative_to(root).as_posix(): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
+
+
+def _commit_chain(p: Project) -> None:
+    p.commit("alpha")
+    p.set_params("beta", BetaParams(mode="keep"))
+    p.commit("beta")
 
 
 def _by_stage(rows: list[LogRow], stage: str) -> list[LogRow]:
@@ -95,7 +116,9 @@ def test_corrupt_cache_entry_is_a_miss_with_warning(project: Project, defaults: 
     fresh = Project(project.root, stages=STUBS, defaults_dir=defaults)  # new session: no memo
     res = fresh.run_stage("alpha")
     assert stub_stages.CALLS == ["alpha"]
-    assert any(i.action == "cache_miss_unreadable" and i.warning for i in res.report)
+    warnings = [i.warning for i in res.report if i.action == "cache_miss_unreadable"]
+    assert len(warnings) == 1 and warnings[0] is not None
+    assert f"cache/alpha/{entry.name}" in warnings[0]
 
 
 def test_incomplete_cache_entry_is_a_miss(project: Project, defaults: Path) -> None:
@@ -131,7 +154,7 @@ def test_run_stage_unresolved_gate_raises_with_field_names(project: Project) -> 
 
 def test_run_stage_without_commit_is_not_done(project: Project) -> None:
     project.run_stage("alpha")
-    assert project.staleness()["alpha"] is not Status.DONE
+    assert project.staleness() == {"alpha": Status.STALE, "beta": Status.BLOCKED}
     assert project.heads == {}
     assert not (project.root / "cache" / "heads.json").exists()
 
@@ -158,16 +181,25 @@ def test_param_change_makes_stage_and_dependents_stale(project: Project) -> None
     assert st["beta"] is Status.STALE
 
 
-def test_config_file_change_makes_reader_stale_not_other(project: Project, defaults: Path) -> None:
-    _accept_beta(project)
-    project.commit("alpha")
-    project.commit("beta")
-    tokens = defaults / "tokens.json"
-    tokens.write_text(tokens.read_text(encoding="utf-8") + "\n", encoding="utf-8")
-    st = project.staleness()
-    assert st["alpha"] is Status.STALE
-    assert st["beta"] is Status.STALE  # via dependency
-    assert project.fingerprint("beta") != ""  # beta reads no config itself
+def test_config_file_change_makes_only_readers_stale(tmp_path: Path, defaults: Path) -> None:
+    root = tmp_path / "proj3"
+    root.mkdir()
+    p = Project(root, stages=STUBS_WITH_GAMMA, defaults_dir=defaults)
+    p.set_params("beta", BetaParams(mode="keep"))
+    for name in ("alpha", "beta", "gamma"):
+        p.commit(name)
+    assert set(p.staleness().values()) == {Status.DONE}
+
+    tokens = defaults / "tokens.json"  # read by alpha only; beta depends on alpha
+    original = tokens.read_text(encoding="utf-8")
+    tokens.write_text(original + "\n", encoding="utf-8")
+    assert p.staleness() == {"alpha": Status.STALE, "beta": Status.STALE, "gamma": Status.DONE}
+    tokens.write_text(original, encoding="utf-8")
+    assert set(p.staleness().values()) == {Status.DONE}
+
+    units = defaults / "known_units.csv"  # read by gamma only
+    units.write_text(units.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    assert p.staleness() == {"alpha": Status.DONE, "beta": Status.DONE, "gamma": Status.STALE}
 
 
 def test_source_change_changes_root_fingerprint(project: Project) -> None:
@@ -252,6 +284,7 @@ def test_existing_checkpoint_dir_raises(project: Project, monkeypatch: pytest.Mo
 
 
 def test_commit_logs_gate_rows_user_and_default_accepted(project: Project) -> None:
+    project.commit("alpha")
     project.set_params("beta", BetaParams(mode="drop"))
     project.commit("beta")
     gate_rows = [r for r in _by_stage(project.log_rows(), "beta") if r.action == "gate"]
@@ -295,28 +328,81 @@ def test_unresolved_gates_listed(project: Project) -> None:
     assert project.unresolved_gates() == ["beta.mode"]
 
 
-def test_recipe_migration_items_are_logged(tmp_path: Path, defaults: Path) -> None:
+def _old_recipe_with_drifted_default(root: Path) -> None:
+    recipe = {
+        "schema_version": 0,
+        "settings": {"min_obs_per_cell": 3},
+        "stages": {"beta": {"mode": {"accept_default": True, "value": "old"}}},
+    }
+    (root / "recipe.json").write_text(json.dumps(recipe), encoding="utf-8")
+
+
+def _v0_to_v1(d: dict[str, object]) -> dict[str, object]:
+    return {**d, "schema_version": 1}
+
+
+def test_notices_are_held_in_memory_and_construction_writes_nothing(
+    tmp_path: Path, defaults: Path
+) -> None:
+    (defaults / "PLACEHOLDER").write_text("", encoding="utf-8")
     root = tmp_path / "p2"
     root.mkdir()
-    old = {"schema_version": 0, "settings": {"min_obs_per_cell": 3}, "stages": {}}
-    (root / "recipe.json").write_text(json.dumps(old), encoding="utf-8")
-
-    def v0_to_v1(d: dict[str, object]) -> dict[str, object]:
-        return {**d, "schema_version": 1}
-
-    p = Project(root, stages=STUBS, defaults_dir=defaults, recipe_registry={0: v0_to_v1})
-    rows = p.log_rows()
-    assert [r.type for r in rows] == ["migration"]
-    assert rows[0].action == "migration"
+    _old_recipe_with_drifted_default(root)
+    before = _snapshot(tmp_path)
+    first = Project(root, stages=STUBS, defaults_dir=defaults, recipe_registry={0: _v0_to_v1})
+    Project(root, stages=STUBS, defaults_dir=defaults, recipe_registry={0: _v0_to_v1})
+    assert _snapshot(tmp_path) == before
+    assert not (root / "log").exists()
+    actions = sorted(i.action for i in first.notices)
+    assert actions == ["gate_default_changed", "migration", "placeholder_config"]
 
 
-def test_placeholder_marker_surfaced_and_logged(tmp_path: Path, defaults: Path) -> None:
+def test_commit_logs_migration_once_and_clears_it(tmp_path: Path, defaults: Path) -> None:
+    root = tmp_path / "p2"
+    root.mkdir()
+    _old_recipe_with_drifted_default(root)
+    p = Project(root, stages=STUBS, defaults_dir=defaults, recipe_registry={0: _v0_to_v1})
+    p.commit("alpha")
+    p.commit("alpha")
+    migrations = [r for r in p.log_rows() if r.action == "migration"]
+    assert len(migrations) == 1 and migrations[0].type == "migration"
+    assert all(i.action != "migration" for i in p.notices)
+    # a later session re-logs it until the recipe is rewritten (accepted, decisions.md)
+    again = Project(root, stages=STUBS, defaults_dir=defaults, recipe_registry={0: _v0_to_v1})
+    again.commit("alpha")
+    assert len([r for r in again.log_rows() if r.action == "migration"]) == 2
+
+
+def test_drift_notice_is_logged_only_with_owning_stage_commit(
+    tmp_path: Path, defaults: Path
+) -> None:
+    root = tmp_path / "p2"
+    root.mkdir()
+    _old_recipe_with_drifted_default(root)
+    p = Project(root, stages=STUBS, defaults_dir=defaults, recipe_registry={0: _v0_to_v1})
+    p.commit("alpha")
+    assert [r for r in p.log_rows() if r.action == "gate_default_changed"] == []
+    p.commit("beta")
+    drift = [r for r in p.log_rows() if r.action == "gate_default_changed"]
+    assert len(drift) == 1 and drift[0].stage == "beta" and drift[0].target == "beta.mode"
+    assert "old" in drift[0].warnings[0] and "keep" in drift[0].warnings[0]
+
+
+def test_placeholder_notice_is_surfaced_and_logged_once_per_commit(
+    tmp_path: Path, defaults: Path
+) -> None:
     (defaults / "PLACEHOLDER").write_text("", encoding="utf-8")
     root = tmp_path / "p3"
     root.mkdir()
     p = Project(root, stages=STUBS, defaults_dir=defaults)
     assert p.placeholder is True
-    assert any(r.action == "placeholder_config" and r.warnings for r in p.log_rows())
+    assert any(i.action == "placeholder_config" and i.warning for i in p.notices)
+    assert p.log_rows() == []
+    p.commit("alpha")
+    rows = [r for r in p.log_rows() if r.action == "placeholder_config"]
+    assert len(rows) == 1 and rows[0].warnings
+    p.commit("alpha")
+    assert len([r for r in p.log_rows() if r.action == "placeholder_config"]) == 2
 
 
 def test_no_placeholder_when_marker_absent(project: Project) -> None:
@@ -330,3 +416,63 @@ def test_needs_attention_is_empty_stub(project: Project) -> None:
 def test_unknown_stage_name_raises(project: Project) -> None:
     with pytest.raises(KeyError):
         project.run_stage("nope")
+
+
+# ---- dependencies, duplicate names, log errors ----
+
+
+def test_commit_refuses_when_dependency_has_no_head(project: Project) -> None:
+    _accept_beta(project)
+    with pytest.raises(DependencyNotCommittedError) as exc:
+        project.commit("beta")
+    assert (exc.value.stage, exc.value.dependency) == ("beta", "alpha")
+    assert (
+        "beta" in str(exc.value)
+        and "alpha" in str(exc.value)
+        and "Commit 'alpha' first" in str(exc.value)
+    )
+    assert project.log_rows() == [] and not (project.root / "checkpoints").exists()
+
+
+def test_commit_refuses_when_dependency_head_is_stale(project: Project, defaults: Path) -> None:
+    _accept_beta(project)
+    project.commit("alpha")
+    tokens = defaults / "tokens.json"  # alpha reads it: its head is now stale
+    tokens.write_text(tokens.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    with pytest.raises(DependencyNotCommittedError) as exc:
+        project.commit("beta")
+    assert exc.value.status == "stale" and "stale" in str(exc.value)
+    project.commit("alpha")
+    project.commit("beta")  # fine once alpha is recommitted
+
+
+def test_duplicate_stage_names_raise(tmp_path: Path, defaults: Path) -> None:
+    root = tmp_path / "dup"
+    root.mkdir()
+    with pytest.raises(ValueError, match="alpha"):
+        Project(root, stages=(Alpha, Alpha), defaults_dir=defaults)
+
+
+def test_damaged_log_error_names_file_and_line(project: Project) -> None:
+    project.commit("alpha")
+    log = project.root / "log" / "decisions.jsonl"
+    lines = log.read_text(encoding="utf-8").splitlines()
+    lines.insert(1, "{not json")
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError) as exc:
+        project.log_rows()
+    assert "decisions.jsonl" in str(exc.value) and "line 2" in str(exc.value)
+
+
+def test_current_recipe_matches_build_recipe(project: Project) -> None:
+    from core.recipe import build_recipe
+
+    _accept_beta(project)
+    expected = build_recipe(
+        project_root=project.root,
+        source_paths=[],
+        config_snapshot=project.current_recipe().config,
+        settings=project.current_recipe().settings,
+        stages=dict(project.params),
+    )
+    assert project.current_recipe() == expected

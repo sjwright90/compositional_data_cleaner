@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import dataclasses
 import json
 import shutil
@@ -111,11 +112,13 @@ class TestSnapshot:
         assert vocab.snapshot(UsageTracker())["analytes"] == []
 
     def test_rules_and_flags_are_tracked_when_read(self, vocab: Vocabulary) -> None:
+        with (FIXTURE / "date_rules.csv").open(encoding="utf-8", newline="") as fh:
+            n_rules = sum(1 for _ in csv.DictReader(fh))
         used = UsageTracker()
-        assert len(vocab.date_rules(used=used)) == 2
+        assert len(vocab.date_rules(used=used)) == n_rules
         assert vocab.flag_action("u", used=used) == "DL"
         snap = vocab.snapshot(used)
-        assert len(snap["date_rules"]) == 2
+        assert len(snap["date_rules"]) == n_rules
         assert snap["flag_map"] == {"U": "DL"}
 
     def test_only_referenced_snapshot_is_stable(self, vocab: Vocabulary) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -26,6 +27,12 @@ class BetaParams(BaseModel):
 
     mode: Gate[str] = gate_field("keep")
     tag: str = "t"
+
+
+class GammaParams(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    scale: int = 1
 
 
 @dataclass(frozen=True)
@@ -75,4 +82,29 @@ class Beta:
         return StageResult(BetaOut(table, "beta"), report)
 
 
+class Gamma:
+    """Independent root stage reading a different config file than Alpha."""
+
+    name: ClassVar[str] = "gamma"
+    version: ClassVar[str] = "1"
+    depends_on: ClassVar[tuple[str, ...]] = ()
+    config_files: ClassVar[tuple[str, ...]] = ("known_units.csv",)
+    Params: ClassVar[type[Any]] = GammaParams
+
+    def run(
+        self, inputs: tuple[Any, ...], params: GammaParams, vocab: Vocabulary
+    ) -> StageResult[pd.DataFrame]:
+        CALLS.append(self.name)
+        out = pd.DataFrame({"scale": [params.scale]})
+        return StageResult(out, (ReportItem("scale", "scale", 1, {"scale": params.scale}),))
+
+
 STUBS: tuple[type[Any], ...] = (Alpha, Beta)
+STUBS_WITH_GAMMA: tuple[type[Any], ...] = (Alpha, Beta, Gamma)
+
+# stage name -> (inputs, params) builder, for the architecture checks
+STUB_ARCH_INPUTS: dict[str, Callable[[], tuple[Any, Any]]] = {
+    "alpha": lambda: ((), AlphaParams()),
+    "beta": lambda: (pd.DataFrame({"n_sources": [0], "x": [1]}), BetaParams(mode="keep")),
+    "gamma": lambda: ((), GammaParams()),
+}

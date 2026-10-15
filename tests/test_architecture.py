@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 import copy
 import dataclasses
-import typing
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, ClassVar
@@ -13,10 +12,18 @@ from typing import Any, ClassVar
 import numpy as np
 import pandas as pd
 import pytest
+from pydantic import BaseModel
 
-from core.pipeline import ReportItem, Stage, StageResult
+from core.config import CONFIG_FILES
+from core.pipeline import ReportItem, StageResult
 from core.stages import STAGES
+from core.vocab import Vocabulary
 from tests.arch_inputs import ARCH_INPUTS
+from tests.stub_stages import STUB_ARCH_INPUTS, STUBS_WITH_GAMMA
+
+# Real stages plus the stub stages, so the checks execute before any real stage exists.
+ALL_STAGES: tuple[type[Any], ...] = (*STAGES, *STUBS_WITH_GAMMA)
+ALL_INPUTS: dict[str, Callable[[], tuple[Any, Any]]] = {**STUB_ARCH_INPUTS, **ARCH_INPUTS}
 
 CORE_DIR = Path(__file__).resolve().parents[1] / "core"
 
@@ -40,6 +47,19 @@ def find_dash_imports(source: str) -> list[str]:
     return found
 
 
+def find_app_imports(source: str) -> list[str]:
+    """Return imported module names whose root is `app` (core must never import the UI)."""
+    found: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        names: list[str] = []
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            names = [node.module]
+        found.extend(n for n in names if n.split(".")[0] == "app")
+    return found
+
+
 def scan_dash_imports(root: Path) -> dict[str, list[str]]:
     hits: dict[str, list[str]] = {}
     for path in sorted(root.rglob("*.py")):
@@ -49,14 +69,56 @@ def scan_dash_imports(root: Path) -> dict[str, list[str]]:
     return hits
 
 
+def scan_app_imports(root: Path) -> dict[str, list[str]]:
+    hits: dict[str, list[str]] = {}
+    for path in sorted(root.rglob("*.py")):
+        names = find_app_imports(path.read_text(encoding="utf-8"))
+        if names:
+            hits[str(path.relative_to(root))] = names
+    return hits
+
+
+_STAGE_ATTRS = ("name", "version", "depends_on", "config_files", "Params")
+
+
+def stage_contract_problems(
+    stages: Sequence[type[Any]], known_config: Iterable[str] = CONFIG_FILES
+) -> list[str]:
+    """Plain-language problems with the class-level contract of a set of stages."""
+    problems: list[str] = []
+    known = set(known_config)
+    names = [getattr(s, "name", s.__name__) for s in stages]
+    for dup in sorted({n for n in names if names.count(n) > 1}):
+        problems.append(f"stage name {dup!r} is registered more than once")
+    for s in stages:
+        label = getattr(s, "name", s.__name__)
+        for attr in _STAGE_ATTRS:
+            if not hasattr(s, attr):
+                problems.append(f"{label}: missing class attribute {attr!r}")
+        if not hasattr(s, "run"):
+            problems.append(f"{label}: missing run()")
+        params = getattr(s, "Params", None)
+        if params is not None and not (isinstance(params, type) and issubclass(params, BaseModel)):
+            problems.append(f"{label}: Params must be a pydantic BaseModel subclass")
+        for f in getattr(s, "config_files", ()):
+            if f not in known:
+                problems.append(f"{label}: config file {f!r} is not a known config file")
+        for d in getattr(s, "depends_on", ()):
+            if d not in names:
+                problems.append(f"{label}: depends on unregistered stage {d!r}")
+    return problems
+
+
 def missing_arch_inputs(
     stages: Iterable[type[Any]], inputs_map: Mapping[str, Callable[[], tuple[Any, Any]]]
 ) -> list[str]:
     return sorted(s.name for s in stages if s.name not in inputs_map)
 
 
-def check_stage_result(stage: type[Any], inputs: Any, params: Any) -> StageResult[Any]:
-    result = stage().run(inputs, params, None)
+def check_stage_result(
+    stage: type[Any], inputs: Any, params: Any, vocab: Vocabulary | None = None
+) -> StageResult[Any]:
+    result = stage().run(inputs, params, vocab)
     assert isinstance(result, StageResult), f"{stage.name}: run() must return StageResult"
     assert isinstance(result.report, tuple), f"{stage.name}: report must be a tuple"
     assert len(result.report) >= 1, f"{stage.name}: report must not be empty"
@@ -88,10 +150,12 @@ def assert_equal_deep(a: Any, b: Any, path: str = "root") -> None:
         assert a == b, f"{path}: {a!r} != {b!r}"
 
 
-def check_no_mutation(stage: type[Any], inputs: Any, params: Any) -> None:
+def check_no_mutation(
+    stage: type[Any], inputs: Any, params: Any, vocab: Vocabulary | None = None
+) -> None:
     inputs_before = copy.deepcopy(inputs)
     params_before = copy.deepcopy(params)
-    stage().run(inputs, params, None)
+    stage().run(inputs, params, vocab)
     assert_equal_deep(inputs, inputs_before, "inputs")
     assert_equal_deep(params, params_before, "params")
 
@@ -114,6 +178,7 @@ class GoodStage:
     version: ClassVar[str] = "1"
     depends_on: ClassVar[tuple[str, ...]] = ()
     config_files: ClassVar[tuple[str, ...]] = ()
+    Params: ClassVar[type[Any]] = BaseModel
 
     def run(self, inputs: Holder, params: None, vocab: None) -> StageResult[pd.DataFrame]:
         return StageResult(output=inputs.df.assign(b=1), report=(_item(),))
@@ -159,34 +224,28 @@ def test_core_has_no_dash_imports() -> None:
     assert scan_dash_imports(CORE_DIR) == {}
 
 
-def test_stage_declares_config_files_classvar() -> None:
-    hints = typing.get_type_hints(Stage)
-    assert hints["config_files"] == ClassVar[tuple[str, ...]]
+def test_core_does_not_import_app() -> None:
+    assert scan_app_imports(CORE_DIR) == {}
+
+
+def test_stage_contract_attributes() -> None:
+    assert stage_contract_problems(ALL_STAGES) == []
 
 
 def test_every_stage_has_arch_inputs() -> None:
-    assert missing_arch_inputs(STAGES, ARCH_INPUTS) == []
+    assert missing_arch_inputs(ALL_STAGES, ALL_INPUTS) == []
 
 
-@pytest.mark.parametrize("stage", STAGES, ids=lambda s: s.name)
-def test_registered_stage_returns_stage_result(stage: type[Any]) -> None:
-    inputs, params = ARCH_INPUTS[stage.name]()
-    check_stage_result(stage, inputs, params)
+@pytest.mark.parametrize("stage", ALL_STAGES, ids=lambda s: s.name)
+def test_registered_stage_returns_stage_result(stage: type[Any], arch_vocab: Vocabulary) -> None:
+    inputs, params = ALL_INPUTS[stage.name]()
+    check_stage_result(stage, inputs, params, arch_vocab)
 
 
-@pytest.mark.parametrize("stage", STAGES, ids=lambda s: s.name)
-def test_registered_stage_does_not_mutate_inputs(stage: type[Any]) -> None:
-    inputs, params = ARCH_INPUTS[stage.name]()
-    check_no_mutation(stage, inputs, params)
-
-
-def test_layer_helpers_are_not_stages() -> None:
-    """A4: impute layers are plain helpers; only classes listed in STAGES are checked."""
-
-    def layer(df: pd.DataFrame) -> tuple[pd.DataFrame, tuple[ReportItem, ...]]:
-        return df, ()
-
-    assert all(layer is not s and getattr(s, "run", None) is not layer for s in STAGES)
+@pytest.mark.parametrize("stage", ALL_STAGES, ids=lambda s: s.name)
+def test_registered_stage_does_not_mutate_inputs(stage: type[Any], arch_vocab: Vocabulary) -> None:
+    inputs, params = ALL_INPUTS[stage.name]()
+    check_no_mutation(stage, inputs, params, arch_vocab)
 
 
 # ---- detector self-tests -----------------------------------------------------------------
@@ -211,6 +270,46 @@ def test_dash_scan_finds_file_in_fake_core(tmp_path: Path) -> None:
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "bad.py").write_text("from dash import html\n", encoding="utf-8")
     assert scan_dash_imports(tmp_path) == {str(Path("sub") / "bad.py"): ["dash"]}
+
+
+def test_app_detector_flags_bad_sources() -> None:
+    assert find_app_imports("import app") == ["app"]
+    assert find_app_imports("from app.layout import x") == ["app.layout"]
+    assert find_app_imports("import application\nfrom core import app_state") == []
+
+
+def test_app_scan_finds_file_in_fake_core(tmp_path: Path) -> None:
+    (tmp_path / "ok.py").write_text("import pandas\n", encoding="utf-8")
+    (tmp_path / "bad.py").write_text("from app import ui\n", encoding="utf-8")
+    assert scan_app_imports(tmp_path) == {"bad.py": ["app"]}
+
+
+class _NoParams(GoodStage):
+    name: ClassVar[str] = "no_params"
+    Params: ClassVar[type[Any]] = dict
+
+
+class _UnknownConfig(GoodStage):
+    name: ClassVar[str] = "unknown_config"
+    config_files: ClassVar[tuple[str, ...]] = ("not_a_config.csv",)
+
+
+class _OrphanDep(GoodStage):
+    name: ClassVar[str] = "orphan_dep"
+    depends_on: ClassVar[tuple[str, ...]] = ("ghost",)
+
+
+class _MissingAttrs:
+    name: ClassVar[str] = "missing_attrs"
+
+
+def test_contract_check_detects_bad_stages() -> None:
+    assert any("Params" in p for p in stage_contract_problems([_NoParams]))
+    assert any("not_a_config.csv" in p for p in stage_contract_problems([_UnknownConfig]))
+    assert any("ghost" in p for p in stage_contract_problems([_OrphanDep]))
+    missing = stage_contract_problems([_MissingAttrs])
+    assert any("version" in p for p in missing) and any("run()" in p for p in missing)
+    assert any("more than once" in p for p in stage_contract_problems([GoodStage, GoodStage]))
 
 
 def test_missing_arch_inputs_detector() -> None:
