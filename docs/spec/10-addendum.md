@@ -147,3 +147,9 @@ Sam confirmed the real wide format: users tidy all header information onto ONE l
 (e) **Tokens.** `tokens.json` `units_row_labels` and `dl_row_labels` are no longer needed: remove them from the `Tokens` model and from the fixture and default config.
 
 (f) **Fixtures.** The generator writes `lab_e_wide.xlsx` in exactly the reference layout above (Sam hand-edited the generated copy as the reference; it will be overwritten). Cases: a fraction-less `pH_SU` header, underscore unit aliases, a blank cell, `NM`, a GT value, and a new negative case `wide_multirow_header_blocks` (the old two-row units/DL form, in its own file) that must give the (d) message. `truth.json`, the case list and `REQUIRED_CASE_IDS` are updated; the case count changes (41 → 42).
+
+## A17. Source formats
+**Overrides:** §6.1 ("Which files/sheets to include (xlsx/xls/csv/parquet)"). Sam confirmed.
+Supported source formats are `.xlsx` and `.csv` only. `.xls` and `.parquet` sources are dropped; the internal Parquet cache (§4) is unaffected.
+- `Project.import_sources` checks the extension of every path (case-insensitive) before copying anything.
+- If any path is unsupported it raises a `ProjectError` subclass whose plain message lists each unsupported file and says "save it as .xlsx or .csv". Nothing is imported: no file copied, no recipe change, no log row.
