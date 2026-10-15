@@ -15,14 +15,16 @@ import pytest
 from pydantic import BaseModel
 
 from core.config import CONFIG_FILES
-from core.pipeline import ReportItem, StageResult
+from core.pipeline import ReportItem, StageResult, SyncResult
 from core.stages import STAGES
 from core.vocab import Vocabulary
 from tests.arch_inputs import ARCH_INPUTS
-from tests.stub_stages import STUB_ARCH_INPUTS, STUBS_WITH_GAMMA
+from tests.stub_stages import STUB_ARCH_INPUTS, STUBS_PLUMBING, STUBS_WITH_GAMMA
 
 # Real stages plus the stub stages, so the checks execute before any real stage exists.
-ALL_STAGES: tuple[type[Any], ...] = (*STAGES, *STUBS_WITH_GAMMA)
+ALL_STAGES: tuple[type[Any], ...] = (*STAGES, *STUBS_WITH_GAMMA, *STUBS_PLUMBING)
+SUGGEST_STAGES = tuple(s for s in ALL_STAGES if hasattr(s, "suggest"))
+SYNC_STAGES = tuple(s for s in ALL_STAGES if hasattr(s, "sync_params"))
 ALL_INPUTS: dict[str, Callable[[], tuple[Any, Any]]] = {**STUB_ARCH_INPUTS, **ARCH_INPUTS}
 
 CORE_DIR = Path(__file__).resolve().parents[1] / "core"
@@ -160,6 +162,37 @@ def check_no_mutation(
     assert_equal_deep(params, params_before, "params")
 
 
+def check_suggest_pure(
+    stage: type[Any], inputs: Any, params: Any, vocab: Vocabulary | None = None
+) -> None:
+    """`suggest` is deterministic and does not mutate its inputs or params."""
+    s = stage()
+    inputs_before = copy.deepcopy(inputs)
+    params_before = copy.deepcopy(params)
+    first = dict(s.suggest(inputs, params, vocab))
+    second = dict(s.suggest(inputs, params, vocab))
+    assert first == second, f"{stage.name}: suggest() is not deterministic"
+    assert_equal_deep(inputs, inputs_before, "inputs")
+    assert_equal_deep(params, params_before, "params")
+
+
+def check_sync_pure(
+    stage: type[Any], inputs: Any, params: Any, vocab: Vocabulary | None = None
+) -> None:
+    """`sync_params` is deterministic, idempotent and does not mutate its inputs or params."""
+    s = stage()
+    inputs_before = copy.deepcopy(inputs)
+    params_before = copy.deepcopy(params)
+    first = s.sync_params(inputs, params, vocab)
+    assert isinstance(first, SyncResult), f"{stage.name}: sync_params() must return SyncResult"
+    second = s.sync_params(inputs, params, vocab)
+    assert first == second, f"{stage.name}: sync_params() is not deterministic"
+    assert_equal_deep(inputs, inputs_before, "inputs")
+    assert_equal_deep(params, params_before, "params")
+    again = s.sync_params(inputs, first.params, vocab)
+    assert again == first, f"{stage.name}: sync_params() is not idempotent"
+
+
 # ---- fakes for detector self-tests -------------------------------------------------------
 
 
@@ -248,7 +281,88 @@ def test_registered_stage_does_not_mutate_inputs(stage: type[Any], arch_vocab: V
     check_no_mutation(stage, inputs, params, arch_vocab)
 
 
+@pytest.mark.parametrize("stage", SUGGEST_STAGES, ids=lambda s: s.name)
+def test_suggest_is_pure(stage: type[Any], arch_vocab: Vocabulary) -> None:
+    inputs, params = ALL_INPUTS[stage.name]()
+    check_suggest_pure(stage, inputs, params, arch_vocab)
+
+
+@pytest.mark.parametrize("stage", SYNC_STAGES, ids=lambda s: s.name)
+def test_sync_params_is_pure_and_idempotent(stage: type[Any], arch_vocab: Vocabulary) -> None:
+    inputs, params = ALL_INPUTS[stage.name]()
+    check_sync_pure(stage, inputs, params, arch_vocab)
+
+
 # ---- detector self-tests -----------------------------------------------------------------
+
+
+class _Params(BaseModel):
+    tags: list[str] = []
+
+
+class _GoodHooks(GoodStage):
+    name: ClassVar[str] = "good_hooks"
+    Params: ClassVar[type[Any]] = _Params
+
+    def suggest(self, inputs: Holder, params: _Params, vocab: None) -> dict[str, Any]:
+        return {"tags": len(params.tags)}
+
+    def sync_params(self, inputs: Holder, params: _Params, vocab: None) -> SyncResult:
+        tags = list(params.tags)
+        if "x" not in tags:
+            tags.append("x")
+        return SyncResult(params.model_copy(update={"tags": tags}))
+
+
+class _NondeterministicSuggest(_GoodHooks):
+    calls: ClassVar[int] = 0
+
+    def suggest(self, inputs: Holder, params: _Params, vocab: None) -> dict[str, Any]:
+        type(self).calls += 1
+        return {"tags": type(self).calls}
+
+
+class _MutatingSuggest(_GoodHooks):
+    def suggest(self, inputs: Holder, params: _Params, vocab: None) -> dict[str, Any]:
+        inputs.df.loc[0, "a"] = 99
+        return {}
+
+
+class _NonIdempotentSync(_GoodHooks):
+    def sync_params(self, inputs: Holder, params: _Params, vocab: None) -> SyncResult:
+        return SyncResult(params.model_copy(update={"tags": [*params.tags, "x"]}))
+
+
+class _MutatingSync(_GoodHooks):
+    def sync_params(self, inputs: Holder, params: _Params, vocab: None) -> SyncResult:
+        params.tags.append("x")
+        return SyncResult(params)
+
+
+def test_suggest_check_accepts_pure_suggest() -> None:
+    check_suggest_pure(_GoodHooks, _holder(), _Params())
+
+
+@pytest.mark.parametrize("bad", [_NondeterministicSuggest, _MutatingSuggest])
+def test_suggest_check_rejects_bad_suggest(bad: type[Any]) -> None:
+    with pytest.raises(AssertionError):
+        check_suggest_pure(bad, _holder(), _Params())
+
+
+def test_sync_check_accepts_pure_idempotent_sync() -> None:
+    check_sync_pure(_GoodHooks, _holder(), _Params())
+
+
+@pytest.mark.parametrize("bad", [_NonIdempotentSync, _MutatingSync])
+def test_sync_check_rejects_bad_sync(bad: type[Any]) -> None:
+    with pytest.raises(AssertionError):
+        check_sync_pure(bad, _holder(), _Params())
+
+
+def test_blocking_report_item_needs_a_warning() -> None:
+    with pytest.raises(ValueError):
+        ReportItem("x", "t", 1, blocking=True)
+    assert ReportItem("x", "t", 1, warning="problem", blocking=True).blocking
 
 
 def test_dash_detector_flags_bad_sources() -> None:

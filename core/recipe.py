@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import types
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ T = TypeVar("T")
 M = TypeVar("M", bound=BaseModel)
 
 _GATE_DEFAULT_KEY = "gate_default"
+_GATE_SUGGESTED_KEY = "gate_suggested"
 
 
 # ---- gates ----
@@ -40,14 +42,22 @@ class AcceptDefault(BaseModel, Generic[T]):
 Gate = Union[T, AcceptDefault[T], None]  # noqa: UP007  (TypeVar union must stay subscriptable)
 
 
-def gate_field(default: Any) -> Any:
-    """Declare a gate on a stage's `Params`; `default` is the value accepting it records."""
-    return Field(default=None, json_schema_extra={_GATE_DEFAULT_KEY: default})
+def gate_field(default: Any, *, suggested: bool = False) -> Any:
+    """Declare a gate on a stage's `Params`; `default` is the value accepting it records.
+
+    With `suggested=True` the value comes only from `Stage.suggest`; `default` is not used to
+    resolve it (a missing suggestion leaves the gate unresolved).
+    """
+    return Field(
+        default=None,
+        json_schema_extra={_GATE_DEFAULT_KEY: default, _GATE_SUGGESTED_KEY: suggested},
+    )
 
 
 @dataclass(frozen=True)
 class GateSpec:
     default: Any
+    suggested: bool = False
 
 
 def _is_gate(annotation: Any) -> bool:
@@ -62,16 +72,24 @@ def _nested_model(annotation: Any) -> type[BaseModel] | None:
     return None
 
 
+def _spec(info: Any, path: str) -> GateSpec:
+    extra = info.json_schema_extra
+    if not isinstance(extra, dict) or _GATE_DEFAULT_KEY not in extra:
+        raise TypeError(f"Gate field '{path}' must be declared with gate_field(default).")
+    return GateSpec(extra[_GATE_DEFAULT_KEY], bool(extra.get(_GATE_SUGGESTED_KEY, False)))
+
+
 def gate_fields(params_cls: type[BaseModel], prefix: str = "") -> dict[str, GateSpec]:
-    """Dotted field path -> spec, for every gate on a Params model (recursing into sub-models)."""
+    """Dotted field path -> spec, for every gate on a Params model (recursing into sub-models).
+
+    Class level: sees flat fields and single sub-models only; use `gate_paths` on an instance
+    to also find gates inside lists and dicts of sub-models.
+    """
     out: dict[str, GateSpec] = {}
     for name, info in params_cls.model_fields.items():
         path = f"{prefix}{name}"
         if _is_gate(info.annotation):
-            extra = info.json_schema_extra
-            if not isinstance(extra, dict) or _GATE_DEFAULT_KEY not in extra:
-                raise TypeError(f"Gate field '{path}' must be declared with gate_field(default).")
-            out[path] = GateSpec(extra[_GATE_DEFAULT_KEY])
+            out[path] = _spec(info, path)
             continue
         nested = _nested_model(info.annotation)
         if nested is not None:
@@ -79,59 +97,189 @@ def gate_fields(params_cls: type[BaseModel], prefix: str = "") -> dict[str, Gate
     return out
 
 
-def _get(params: BaseModel, path: str) -> Any:
+# ---- indexed paths: `a.b`, `sheets[2].layout`, `maps[key].unit` ----
+
+
+def _esc(key: str) -> str:
+    return key.replace("\\", "\\\\").replace("]", "\\]")
+
+
+_TOKEN = re.compile(r"\.?([A-Za-z_]\w*)|\[((?:\\.|[^\]\\])*)\]")
+
+
+def _tokens(path: str) -> list[tuple[str, bool]]:
+    """`(name or key, is_index)` per path segment."""
+    out: list[tuple[str, bool]] = []
+    pos = 0
+    while pos < len(path):
+        m = _TOKEN.match(path, pos)
+        if m is None or m.end() == pos:
+            raise ValueError(f"Malformed gate path '{path}'.")
+        if m.group(1) is not None:
+            out.append((m.group(1), False))
+        else:
+            out.append((re.sub(r"\\(.)", r"\1", m.group(2)), True))
+        pos = m.end()
+    return out
+
+
+def _index(container: Any, key: str) -> Any:
+    if isinstance(container, Mapping):
+        return container[key]
+    return container[int(key)]
+
+
+def get_path(params: BaseModel, path: str) -> Any:
     obj: Any = params
-    for part in path.split("."):
-        obj = getattr(obj, part)
+    for token, is_index in _tokens(path):
+        obj = _index(obj, token) if is_index else getattr(obj, token)
     return obj
 
 
-def unresolved_gates(stage: str, params: BaseModel) -> list[str]:
-    """`<stage>.<dotted.field>` for every gate still unresolved, sorted."""
+def _set(obj: Any, tokens: list[tuple[str, bool]], value: Any) -> Any:
+    if not tokens:
+        return value
+    (token, is_index), rest = tokens[0], tokens[1:]
+    if not is_index:
+        return obj.model_copy(update={token: _set(getattr(obj, token), rest, value)})
+    if isinstance(obj, Mapping):
+        return {**obj, token: _set(obj[token], rest, value)}
+    items = list(obj)
+    items[int(token)] = _set(items[int(token)], rest, value)
+    return tuple(items) if isinstance(obj, tuple) else items
+
+
+def set_path(params: M, path: str, value: Any) -> M:
+    """New params with the value at `path` replaced (immutable; no validation, like `_accept`)."""
+    result: M = _set(params, _tokens(path), value)
+    return result
+
+
+def _walk(value: Any, path: str, out: dict[str, GateSpec]) -> None:
+    if isinstance(value, BaseModel):
+        out.update(gate_paths(value, f"{path}."))
+    elif isinstance(value, Mapping):
+        for key in sorted(value, key=str):
+            _walk(value[key], f"{path}[{_esc(str(key))}]", out)
+    elif isinstance(value, list | tuple):
+        for i, item in enumerate(value):
+            _walk(item, f"{path}[{i}]", out)
+
+
+def gate_paths(params: BaseModel, prefix: str = "") -> dict[str, GateSpec]:
+    """Path -> spec for every gate on an instance, including those inside lists and dicts of
+    sub-models (`sheets[2].layout`; dict entries `maps[key].unit`)."""
+    out: dict[str, GateSpec] = {}
+    for name, info in type(params).model_fields.items():
+        path = f"{prefix}{name}"
+        if _is_gate(info.annotation):
+            out[path] = _spec(info, path)
+        else:
+            _walk(getattr(params, name), path, out)
+    return out
+
+
+def _excluded(path: str, exclude: Sequence[str]) -> bool:
+    return any(path == p or path.startswith((f"{p}.", f"{p}[")) for p in exclude)
+
+
+def unresolved_gates(stage: str, params: BaseModel, *, exclude: Sequence[str] = ()) -> list[str]:
+    """`<stage>.<path>` for every gate still unresolved, sorted. Paths under `exclude` (orphaned
+    entries) are skipped."""
     return sorted(
-        f"{stage}.{path}" for path in gate_fields(type(params)) if _get(params, path) is None
+        f"{stage}.{path}"
+        for path in gate_paths(params)
+        if not _excluded(path, exclude) and get_path(params, path) is None
     )
 
 
-def accept_defaults(params: M) -> M:
-    """New params with every unresolved gate set to an explicit accepted default."""
-    return _accept(params)
+def accept_defaults(
+    params: M,
+    suggestions: Mapping[str, Any] | None = None,
+    *,
+    exclude: Sequence[str] = (),
+) -> M:
+    """New params with every resolvable unresolved gate set to an explicit accepted default.
+
+    A `suggested` gate is resolved only from `suggestions`; without an entry it stays unresolved.
+    """
+    result: M = _accept_value(params, "", suggestions or {}, exclude)
+    return result
 
 
-def _accept(params: M) -> M:
-    update: dict[str, Any] = {}
-    for name, info in type(params).model_fields.items():
-        value = getattr(params, name)
-        if _is_gate(info.annotation):
-            if value is None:
-                extra = info.json_schema_extra
-                assert isinstance(extra, dict)
-                update[name] = AcceptDefault[Any](
-                    accept_default=True, value=extra[_GATE_DEFAULT_KEY]
-                )
-        elif isinstance(value, BaseModel):
-            update[name] = _accept(value)
-    return params.model_copy(update=update)
+def _accept_value(value: Any, path: str, suggestions: Mapping[str, Any], exclude: Any) -> Any:
+    if isinstance(value, BaseModel):
+        prefix = f"{path}." if path else ""
+        update: dict[str, Any] = {}
+        for name, info in type(value).model_fields.items():
+            field_path = f"{prefix}{name}"
+            if _excluded(field_path, exclude):
+                continue
+            current = getattr(value, name)
+            if _is_gate(info.annotation):
+                if current is not None:
+                    continue
+                spec = _spec(info, field_path)
+                if spec.suggested:
+                    if field_path not in suggestions:
+                        continue
+                    resolved = suggestions[field_path]
+                else:
+                    resolved = spec.default
+                update[name] = AcceptDefault[Any](accept_default=True, value=resolved)
+            else:
+                update[name] = _accept_value(current, field_path, suggestions, exclude)
+        return value.model_copy(update=update)
+    if isinstance(value, Mapping):
+        return {
+            k: _accept_value(v, f"{path}[{_esc(str(k))}]", suggestions, exclude)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_accept_value(v, f"{path}[{i}]", suggestions, exclude) for i, v in enumerate(value)]
+    if isinstance(value, tuple):
+        return tuple(
+            _accept_value(v, f"{path}[{i}]", suggestions, exclude) for i, v in enumerate(value)
+        )
+    return value
 
 
-def gate_default_drift(stage: str, params: BaseModel) -> tuple[ReportItem, ...]:
-    """Warn for each accepted default whose stored value differs from the current default."""
+def gate_default_drift(
+    stage: str,
+    params: BaseModel,
+    suggestions: Mapping[str, Any] | None = None,
+    *,
+    exclude: Sequence[str] = (),
+) -> tuple[ReportItem, ...]:
+    """Warn for each accepted default whose stored value differs from the current default.
+
+    For a `suggested` gate the current default is its suggestion; without `suggestions` (recipe
+    load) or without an entry for the path it is skipped.
+    """
     items: list[ReportItem] = []
-    for path, spec in sorted(gate_fields(type(params)).items()):
-        value = _get(params, path)
+    for path, spec in sorted(gate_paths(params).items()):
+        if _excluded(path, exclude):
+            continue
+        value = get_path(params, path)
         if not isinstance(value, AcceptDefault):
             continue
-        if canonical_json(value.value) != canonical_json(spec.default):
+        if spec.suggested:
+            if suggestions is None or path not in suggestions:
+                continue
+            current = suggestions[path]
+        else:
+            current = spec.default
+        if canonical_json(value.value) != canonical_json(current):
             target = f"{stage}.{path}"
             items.append(
                 ReportItem(
                     "gate_default_changed",
                     target,
                     1,
-                    {"stored": value.value, "current": spec.default},
+                    {"stored": value.value, "current": current},
                     warning=(
                         f"Gate '{target}' was accepted with default {value.value!r}, but the "
-                        f"current default is {spec.default!r}. Review and re-accept if intended."
+                        f"current default is {current!r}. Review and re-accept if intended."
                     ),
                 )
             )

@@ -33,9 +33,14 @@ class ReportItem:
     params: Mapping[str, Any] = field(default_factory=dict)
     evidence: pd.DataFrame | None = field(default=None, compare=False, hash=False)
     warning: str | None = None
+    blocking: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "params", MappingProxyType(dict(self.params)))
+        if self.blocking and not self.warning:
+            raise ValueError(
+                f"Blocking report item '{self.action}' on '{self.target}' needs a warning text."
+            )
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,28 @@ class Stage(Protocol[In, P, Out]):
     Params: ClassVar[type[Any]]
 
     def run(self, inputs: In, params: P, vocab: Vocabulary) -> StageResult[Out]: ...
+
+
+@dataclass(frozen=True)
+class SyncResult:
+    """`params` with entries added for new keys; `orphans` are gate-path prefixes (e.g.
+    `entries[old]`) of decided entries whose key is no longer present."""
+
+    params: BaseModel
+    orphans: tuple[str, ...] = ()
+
+
+class SupportsSuggest(Protocol[In, P]):
+    """Optional. Pure and deterministic; returns stage-relative gate path -> suggested value."""
+
+    def suggest(self, inputs: In, params: P, vocab: Vocabulary) -> Mapping[str, Any]: ...
+
+
+class SupportsSyncParams(Protocol[In, P]):
+    """Optional. Pure, idempotent. Adds an entry (unresolved gates) per new key; keeps decided
+    entries unchanged; drops undecided entries whose key is gone; lists decided ones as orphans."""
+
+    def sync_params(self, inputs: In, params: P, vocab: Vocabulary) -> SyncResult: ...
 
 
 # ---- fingerprints, config hashing and staleness (spec §4.2; addendum A7) ----
