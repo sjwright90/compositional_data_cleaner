@@ -20,7 +20,7 @@
 - Follow-up (T11, first real stage): confirm the multi-dependency input convention (`Project._inputs`: `dict[dep, output]`) and the cache-supported output types (DataFrame, frozen dataclass of DataFrames, scalars).
 - Follow-up (T52): `Project.needs_attention()` is a stub returning `[]`.
 - Follow-up (T33): `project_basic` has no committed recipe; runner tests build one in `tmp_path`.
-- Follow-up (T11/T12): implement A14 (units and DL rows, optional header unit) and test label-based row detection (`units_row_labels` / `dl_row_labels`) with small `tmp_path` files; `lab_e_wide.xlsx` exercises only the unlabelled fallback.
+- Follow-up (T11/T12): Implement A16 (see T11/T12 split).
 - Follow-up (before the first real-data run): review `config/defaults/` against §2 and §7 (e.g. the missing `blank_trip` sample-type alias).
 - Follow-up (T14/T15): custom-vocabulary creation must call `Vocabulary.check_new_analyte` / `check_new_unit`.
 - Follow-up (T11): `core/recipe.py` `gate_fields`/`unresolved_gates` recurse only into direct sub-model fields; gates inside lists or dicts of sub-models (e.g. per-source layout decisions, A14) are not discovered and need indexed paths like `sources[2].layout`.
