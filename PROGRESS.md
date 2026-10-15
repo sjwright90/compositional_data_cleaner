@@ -27,6 +27,7 @@
 - Follow-up (T10): implement A15 (copy sources into `<project>/sources/`). On a root-stage run, re-hash the source copies and block with a plain message if the SHA differs from the recipe. Add a golden test pinning the root `{params, sources}` fingerprint payload (`Project._fingerprint_of`).
 - Follow-up (first task constructing `FeatureId`/`SampleKey`): validate or normalise on construction; add an architecture test that ids are only constructed via `core/ids.py`.
 - Follow-up (first task producing a `WideTable`): return copies from the frame properties; call `validate_wide` in `__post_init__`.
+- Follow-up (T11, first real stage): add a blocking severity to `ReportItem` and make the runner stop on it (stage error convention, decisions.md 2026-10-15).
 - Note only: `_config_hash` is recomputed on every `fingerprint()`/`staleness()` call (cost grows with stages x config files).
 - Note only: the cache round trip turns tuples in report params into lists.
 - Note only: checkpoint directory names have millisecond resolution; a collision raises `FileExistsError` and never overwrites.

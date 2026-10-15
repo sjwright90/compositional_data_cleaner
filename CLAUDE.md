@@ -61,6 +61,8 @@ Do not write `app/` code until the U-tasks are reached in `tasks/INDEX.md`.
    never auto-resolve a gate except via the spec's logged "accept default".
 9. All paths via `pathlib`. Files open in Excel produce a plain-language error.
 10. Never implement anything in `docs/spec/09-testing-milestones-deferred.md` "Deferred".
+11. Data problems are reported, not raised; raise only `ConfigError`/`ProjectError` when a stage
+    cannot proceed (`.claude/rules/core.md`).
 
 ## Working loop (one task per session)
 1. Read `PROGRESS.md`, then the task file, then ONLY the spec sections it names.
