@@ -1,6 +1,6 @@
 # PROGRESS
 
-**State:** T00-T06c and T10 merged to `main`; T11a done on `feature/t11a-plumbing` (pending merge). **Next:** T11b.
+**State:** T00-T06c, T10 and T11a merged to `main`. **Next:** T11b.
 
 ## Done
 - Spec split into `docs/spec/`, CLAUDE.md, path-scoped rules, task breakdown.
