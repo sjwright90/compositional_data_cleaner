@@ -1,6 +1,6 @@
 # PROGRESS
 
-**State:** T00-T06c merged to `main`. **Next:** T10.
+**State:** T00-T06c merged to `main`; A16 added and T10-T16 task files fleshed out (T11 split into T11a/b/c). **Next:** T10.
 
 ## Done
 - Spec split into `docs/spec/`, CLAUDE.md, path-scoped rules, task breakdown.
