@@ -1,6 +1,6 @@
 # PROGRESS
 
-**State:** T00-T06a merged to `main`; T06b on `feature/t06b-project-runner` (checks pass, not merged). **Next:** T10.
+**State:** T00-T06b merged to `main`. **Next:** T10.
 
 ## Done
 - Spec split into `docs/spec/`, CLAUDE.md, path-scoped rules, task breakdown.
